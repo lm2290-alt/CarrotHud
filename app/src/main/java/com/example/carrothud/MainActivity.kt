@@ -21,6 +21,9 @@ class MainActivity : AppCompatActivity() {
         webView = WebView(this)
         setContentView(webView)
 
+        // 안드로이드 오토 렌더링용 웹뷰 공유
+        HudDataManager.webView = webView
+
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -45,14 +48,13 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "콤마4 연결 성공: $visionUrl", Toast.LENGTH_SHORT).show()
                     webView.loadUrl(visionUrl)
                 } else {
-                    Toast.makeText(this@MainActivity, "핫스팟에 연결된 콤마4를 찾지 못했습니다. (핫스팟 연결 확인 필요)", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "핫스팟에 연결된 콤마4를 찾지 못했습니다.", Toast.LENGTH_LONG).show()
                 }
             }
         }
     }
 
     private suspend fun findCommaDeviceIp(): String? = coroutineScope {
-        // 현재 기기의 핫스팟/네트워크 대역 자동 추출 + 기본 대역 후보
         val localSubnets = getLocalSubnets()
         val candidateSubnets = (localSubnets + listOf("192.168.43", "192.168.12", "172.20.10", "192.168.0", "192.168.1")).distinct()
 

@@ -1,55 +1,59 @@
 package com.example.carrothud
 
 import android.os.Bundle
-import android.view.View
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import okhttp3.*
 import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var hudView: HudCanvasView
-    private var webSocket: WebSocket? = null
+
+    private lateinit var speedTextView: TextView
     private val client = OkHttpClient()
-    private val CARROT_WEBSOCKET_URL = "ws://192.168.43.1:8080" 
+    private var webSocket: WebSocket? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.decorView.systemUiVisibility = (
-            View.SYSTEM_UI_FLAG_FULLSCREEN
-            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-            or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        )
-        hudView = HudCanvasView(this)
-        setContentView(hudView)
-        connectCarrotWebSocket()
+        
+        speedTextView = TextView(this).apply {
+            textSize = 80f
+            text = "0"
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+        }
+
+        val rootLayout = android.widget.FrameLayout(this).apply {
+            setBackgroundColor(android.graphics.Color.BLACK)
+            addView(speedTextView, android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+        }
+        setContentView(rootLayout)
+
+        connectWebSocket()
     }
 
-    private fun connectCarrotWebSocket() {
-        val request = Request.Builder().url(CARROT_WEBSOCKET_URL).build()
+    private fun connectWebSocket() {
+        val request = Request.Builder().url("ws://192.168.43.1:8080").build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val json = JSONObject(text)
-                    val speed = json.optInt("vEgo", 0)
-                    val targetSpeed = json.optInt("vSet", 0)
-                    val distance = json.optDouble("dRel", 0.0).toFloat()
-                    val hasCar = json.optBoolean("hasCar", false)
-                    val warning = json.optBoolean("warning", false)
-
-                    hudView.updateHudData(speed, targetSpeed, distance, hasCar, warning)
+                    val speed = json.optInt("speed", 0)
+                    runOnUiThread {
+                        speedTextView.text = speed.toString()
+                    }
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    // 예외 무시
                 }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                hudView.postDelayed({ connectCarrotWebSocket() }, 5000)
             }
         })
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        webSocket?.close(1000, "App closed")
+        webSocket?.close(1000, "App destroyed")
     }
 }
+

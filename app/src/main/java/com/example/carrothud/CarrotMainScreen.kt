@@ -44,14 +44,6 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         startStreamingPipeline()
     }
 
-    override fun onSurfaceVisible(surfaceContainer: SurfaceContainer) {
-        this.surfaceContainer = surfaceContainer
-        if (!isRendering) {
-            isRendering = true
-            startStreamingPipeline()
-        }
-    }
-
     override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
         isRendering = false
         streamJob?.cancel()

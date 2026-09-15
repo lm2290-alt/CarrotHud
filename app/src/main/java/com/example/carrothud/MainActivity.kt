@@ -46,17 +46,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    view?.evaluateJavascript(
-                        """
-                        (function() {
-                            var sidebar = document.querySelector('.sidebar') || document.querySelector('#sidebar');
-                            if (sidebar) sidebar.style.display = 'none';
-                        })();
-                        """.trimIndent(), null
-                    )
-                }
+                Runnable {}.run()
             }
         }
 
@@ -66,7 +56,7 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#CC000000"))
             setPadding(40, 40, 40, 40)
             gravity = Gravity.CENTER
-            text = "콤마 기기 IP 탐색 중..."
+            text = "네트워크 대역 스캔 준비 중..."
         }
 
         layoutContainer.addView(webView)
@@ -78,43 +68,35 @@ class MainActivity : AppCompatActivity() {
 
     private fun startCommaScan() {
         CoroutineScope(Dispatchers.Main).launch {
+            statusTextView.text = "활성 네트워크 분석 중..."
             val commaIp = findCommaDevice()
 
             if (commaIp != null) {
                 val targetUrl = "http://$commaIp:7000"
-                statusTextView.text = "콤마 발견!\n접속: $targetUrl"
-                
+                statusTextView.text = "콤마4 발견! ($targetUrl)"
                 statusTextView.postDelayed({
                     statusTextView.visibility = View.GONE
                 }, 800)
-                
                 webView.loadUrl(targetUrl)
             } else {
-                statusTextView.text = "7000번 포트 응답 기기를 찾지 못했습니다.\n핫스팟 연결 상태를 확인하고 앱을 다시 켜주세요."
+                statusTextView.text = "7000번 포트 응답 기기를 찾지 못했습니다.\n핫스팟 연결 상태를 확인해주세요."
             }
         }
     }
 
     private suspend fun findCommaDevice(): String? = withContext(Dispatchers.IO) {
-        // 1. 게이트웨이(공유기/콤마 본체 주소 추정) 먼저 빠르게 단독 테스트 (.1 또는 .254 등)
         val subnets = getAllActiveSubnets()
-        for (subnet in subnets) {
-            val gatewayCandidates = listOf("$subnet.1", "$subnet.254", "$subnet.2", "$subnet.100")
-            for (ip in gatewayCandidates) {
-                if (checkPort7000(ip)) {
-                    return@withContext ip
-                }
-            }
-        }
+        
+        // 만약 활성 서브넷을 못 잡았을 경우를 대비한 안전 장치 (안드로이드 핫스팟 기본 대역들 강제 포함)
+        val defaultSubnets = listOf("192.168.43", "192.168.1", "192.168.0", "192.168.123", "10.0.0")
+        val totalSubnets = (subnets + defaultSubnets).distinct()
 
-        // 2. 안 잡히면 전체 대역 병렬 스캔
-        if (subnets.isEmpty()) return@withContext null
-
-        for (subnet in subnets) {
+        for (subnet in totalSubnets) {
             withContext(Dispatchers.Main) {
-                statusTextView.text = "정밀 스캔 중: $subnet.1 ~ 254"
+                statusTextView.text = "스캔 중: $subnet.1 ~ 254 (포트 7000)"
             }
 
+            // 1부터 254까지 모든 IP를 코루틴으로 동시에 찔러봄 (매우 빠른 속도)
             val deferreds = (1..254).map { host ->
                 async(Dispatchers.IO) {
                     val targetIp = "$subnet.$host"
@@ -123,7 +105,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             val foundIp = deferreds.awaitAll().filterNotNull().firstOrNull()
-            if (foundIp != null) return@withContext foundIp
+            if (foundIp != null) {
+                return@withContext foundIp
+            }
         }
 
         return@withContext null
@@ -135,8 +119,10 @@ class MainActivity : AppCompatActivity() {
             val interfaces = NetworkInterface.getNetworkInterfaces()
             while (interfaces.hasMoreElements()) {
                 val netInterface = interfaces.nextElement()
-                val addresses = netInterface.inetAddresses
+                // 루프백 및 다운된 인터페이스 제외
+                if (!netInterface.isUp || netInterface.isLoopback) continue
 
+                val addresses = netInterface.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val addr = addresses.nextElement()
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
@@ -160,7 +146,8 @@ class MainActivity : AppCompatActivity() {
     private fun checkPort7000(ip: String): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, 7000), 100)
+                // 타임아웃을 짧게 주어 전 영역을 순식간에 스캔
+                socket.connect(InetSocketAddress(ip, 7000), 80)
                 true
             }
         } catch (e: Exception) {

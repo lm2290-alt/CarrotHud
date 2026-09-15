@@ -38,4 +38,3 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext) {
         ).setTitle("CarrotHUD").build()
     }
 }
-

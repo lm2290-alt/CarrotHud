@@ -18,7 +18,7 @@ class MainActivity : Activity() {
     private var scanJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate()
+        super.onCreate(savedInstanceState)
 
         // 폰 화면 꺼짐 방지
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

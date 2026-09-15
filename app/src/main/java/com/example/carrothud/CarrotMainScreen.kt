@@ -78,13 +78,13 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     mediaPlaybackRequiresUserGesture = false
                     useWideViewPort = true
                     loadWithOverviewMode = true
-                    textZoom = 100 // 글자 크기 고정 (크기 유동 현상 방지)
+                    textZoom = 100 // 글자 크기 변동(커졌다 작아짐) 방지
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
                 webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
-                        // '당근 비전 시작' 버튼 자동 클릭 스크립트
+                        // '당근 비전 시작' 버튼 자동 클릭 자바스크립트 실행
                         val autoStartScript = """
                             (function() {
                                 var attempts = 0;
@@ -94,7 +94,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                                     for (var i = 0; i < allElements.length; i++) {
                                         var el = allElements[i];
                                         var txt = (el.innerText || el.textContent || '').trim();
-                                        if (txt.indexOf('당근 비전 시작') !== -1 || txt.indexOf('비전 시작') !== -1) {
+                                        if (txt.indexOf('당근 비전 시작') !== -1 || txt.indexOf('비전 시작') !== -1 || txt.indexOf('시작') !== -1) {
                                             el.click();
                                             if (el.parentElement) el.parentElement.click();
                                         }
@@ -147,7 +147,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 val width = if (container.width > 0) container.width else 1280
                 val height = if (container.height > 0) container.height else 720
 
-                // 화면 해상도가 실제로 변경되었을 때만 measure/layout 수행
+                // 화면 해상도가 변경되었을 때만 레이아웃 재계산 (글자 폰트 변경 현상 방지)
                 if (width != lastWidth || height != lastHeight) {
                     lastWidth = width
                     lastHeight = height

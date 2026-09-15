@@ -15,6 +15,7 @@ import androidx.car.app.model.Template
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
@@ -49,11 +50,11 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private fun startStreamingPipeline() {
         streamJob?.cancel()
         streamJob = CoroutineScope(Dispatchers.IO).launch {
-            drawMessage("콤마4 연결 대기 중...")
+            drawMessage("콤마4 탐색 중...")
             val commaIp = findCommaDeviceIp()
 
             if (commaIp == null) {
-                drawMessage("콤마4 기기를 찾는 중입니다...")
+                drawMessage("콤마4(포트 7000)를 찾지 못함")
                 delay(2000)
                 startStreamingPipeline()
                 return@launch
@@ -105,7 +106,8 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     }
                 }
             } catch (e: Exception) {
-                drawMessage("재연결 중...")
+                saveCustomLog("Stream Exception: ${e.localizedMessage}")
+                drawMessage("영상 재연결 중...")
                 delay(2000)
             }
         }
@@ -125,7 +127,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 canvas.drawBitmap(bitmap, srcRect, destRect, null)
             }
         } catch (t: Throwable) {
-            // 무시 (크래시 방지)
+            saveCustomLog("Draw Canvas Crash: ${t.localizedMessage}")
         } finally {
             if (canvas != null) {
                 runCatching { surface.unlockCanvasAndPost(canvas) }
@@ -152,11 +154,18 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 canvas.drawText(message, container.width / 2f, container.height / 2f, paint)
             }
         } catch (t: Throwable) {
-            // 무시 (크래시 방지)
+            saveCustomLog("Message Canvas Crash: ${t.localizedMessage}")
         } finally {
             if (canvas != null) {
                 runCatching { surface.unlockCanvasAndPost(canvas) }
             }
+        }
+    }
+
+    private fun saveCustomLog(msg: String) {
+        runCatching {
+            val file = File(carContext.getExternalFilesDir(null), "carrot_crash.txt")
+            file.appendText("${java.util.Date()}: $msg\n")
         }
     }
 

@@ -1,19 +1,17 @@
 package com.example.carrothud
 
 import android.os.Bundle
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
+import java.util.Collections
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
@@ -29,15 +27,15 @@ class MainActivity : AppCompatActivity() {
             mediaPlaybackRequiresUserGesture = false
             useWideViewPort = true
             loadWithOverviewMode = true
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
         webView.webViewClient = WebViewClient()
 
-        // 핫스팟에 연결된 콤마4(7000 포트) 자동 스캔 시작
         scanAndLoadCommaVision()
     }
 
     private fun scanAndLoadCommaVision() {
-        Toast.makeText(this, "콤마4 (당근비전 7000포트) 스캔 중...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "콤마4 (7000포트) 동적 IP 탐색 중...", Toast.LENGTH_SHORT).show()
 
         lifecycleScope.launch(Dispatchers.IO) {
             val commaIp = findCommaDeviceIp()
@@ -47,23 +45,50 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "콤마4 연결 성공: $visionUrl", Toast.LENGTH_SHORT).show()
                     webView.loadUrl(visionUrl)
                 } else {
-                    Toast.makeText(this@MainActivity, "핫스팟에 연결된 콤마4를 찾지 못했습니다.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "핫스팟에 연결된 콤마4를 찾지 못했습니다. (핫스팟 연결 확인 필요)", Toast.LENGTH_LONG).show()
                 }
             }
         }
     }
 
-    // 핫스팟 대역(192.168.43.2 ~ 254) 비동기 병렬 스캔
     private suspend fun findCommaDeviceIp(): String? = coroutineScope {
-        val subnet = "192.168.43"
-        val tasks = (2..254).map { i ->
-            async(Dispatchers.IO) {
-                val testIp = "$subnet.$i"
-                if (isPortOpen(testIp, 7000, 200)) testIp else null
+        // 현재 기기의 핫스팟/네트워크 대역 자동 추출 + 기본 대역 후보
+        val localSubnets = getLocalSubnets()
+        val candidateSubnets = (localSubnets + listOf("192.168.43", "192.168.12", "172.20.10", "192.168.0", "192.168.1")).distinct()
+
+        for (subnet in candidateSubnets) {
+            val tasks = (2..254).map { i ->
+                async(Dispatchers.IO) {
+                    val testIp = "$subnet.$i"
+                    if (isPortOpen(testIp, 7000, 300)) testIp else null
+                }
             }
+            val foundIp = tasks.awaitAll().firstOrNull { it != null }
+            if (foundIp != null) return@coroutineScope foundIp
         }
-        val results = tasks.awaitAll()
-        results.firstOrNull { it != null }
+        null
+    }
+
+    private fun getLocalSubnets(): List<String> {
+        val subnets = mutableListOf<String>()
+        try {
+            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+            for (intf in interfaces) {
+                val addrs = Collections.list(intf.inetAddresses)
+                for (addr in addrs) {
+                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                        val hostAddress = addr.hostAddress ?: continue
+                        val lastDot = hostAddress.lastIndexOf('.')
+                        if (lastDot > 0) {
+                            subnets.add(hostAddress.substring(0, lastDot))
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return subnets
     }
 
     private fun isPortOpen(ip: String, port: Int, timeoutMs: Int): Boolean {

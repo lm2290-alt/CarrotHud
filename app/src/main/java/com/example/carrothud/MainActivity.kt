@@ -9,7 +9,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -55,7 +55,8 @@ class MainActivity : AppCompatActivity() {
 
         Toast.makeText(this, "본체 IP 탐색 중...", Toast.LENGTH_SHORT).show()
 
-        lifecycleScope.launch {
+        // lifecycleScope 대신 기본 CoroutineScope(Dispatchers.Main) 사용
+        CoroutineScope(Dispatchers.Main).launch {
             val detectedIp = scanNetworkForDevice()
             val targetUrl = "http://$detectedIp:7000"
             
@@ -65,15 +66,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun scanNetworkForDevice(): String = withContext(Dispatchers.IO) {
-        // 내 폰의 핫스팟/Wi-Fi Subnet 추출 시도
         val myIp = getLocalIpAddress()
         val subnetBase = if (myIp.contains(".")) {
             myIp.substring(0, myIp.lastIndexOf("."))
         } else {
-            "192.168.43" // 실패시 삼성/일반 안드로이드 기본 핫스팟 대역
+            "192.168.43" // 실패 시 기본 핫스팟 대역
         }
 
-        // 1~50 범위 비동기 병렬 스캔 (속도 최적화)
         val deferreds = (2..50).map { i ->
             async(Dispatchers.IO) {
                 val testIp = "$subnetBase.$i"
@@ -86,7 +85,6 @@ class MainActivity : AppCompatActivity() {
         if (results.isNotEmpty()) {
             results[0]
         } else {
-            // 탐색 안될 시 기존 수동 고정 IP 사용
             "10.239.225.61"
         }
     }

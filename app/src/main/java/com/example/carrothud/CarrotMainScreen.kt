@@ -31,6 +31,9 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private var webView: WebView? = null
     private val renderLock = Any()
 
+    private var lastWidth = -1
+    private var lastHeight = -1
+
     init {
         runCatching {
             val navigationManager = carContext.getCarService(NavigationManager::class.java)
@@ -75,9 +78,36 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     mediaPlaybackRequiresUserGesture = false
                     useWideViewPort = true
                     loadWithOverviewMode = true
+                    textZoom = 100 // 글자 크기 고정 (크기 유동 현상 방지)
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
-                webViewClient = WebViewClient()
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        // '당근 비전 시작' 버튼 자동 클릭 스크립트
+                        val autoStartScript = """
+                            (function() {
+                                var attempts = 0;
+                                var autoClicker = setInterval(function() {
+                                    attempts++;
+                                    var allElements = document.getElementsByTagName('*');
+                                    for (var i = 0; i < allElements.length; i++) {
+                                        var el = allElements[i];
+                                        var txt = (el.innerText || el.textContent || '').trim();
+                                        if (txt.indexOf('당근 비전 시작') !== -1 || txt.indexOf('비전 시작') !== -1) {
+                                            el.click();
+                                            if (el.parentElement) el.parentElement.click();
+                                        }
+                                    }
+                                    if (attempts > 20) {
+                                        clearInterval(autoClicker);
+                                    }
+                                }, 500);
+                            })();
+                        """.trimIndent()
+                        view?.evaluateJavascript(autoStartScript, null)
+                    }
+                }
             }
         }
     }
@@ -117,11 +147,16 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 val width = if (container.width > 0) container.width else 1280
                 val height = if (container.height > 0) container.height else 720
 
-                wv.measure(
-                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
-                )
-                wv.layout(0, 0, width, height)
+                // 화면 해상도가 실제로 변경되었을 때만 measure/layout 수행
+                if (width != lastWidth || height != lastHeight) {
+                    lastWidth = width
+                    lastHeight = height
+                    wv.measure(
+                        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+                    )
+                    wv.layout(0, 0, width, height)
+                }
 
                 var canvas: android.graphics.Canvas? = null
                 try {

@@ -19,11 +19,15 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private val handler = Handler(Looper.getMainLooper())
     private var isRendering = false
 
+    // 메모리 누수 방지용 캐시 버퍼
+    private var cachedBitmap: Bitmap? = null
+    private var cachedCanvas: Canvas? = null
+
     private val renderRunnable = object : Runnable {
         override fun run() {
             if (isRendering) {
                 drawWebViewToSurface()
-                handler.postDelayed(this, 100) // 10 FPS로 안정화
+                handler.postDelayed(this, 100) // 10 FPS
             }
         }
     }
@@ -46,6 +50,13 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         isRendering = false
         this.surfaceContainer = null
         handler.removeCallbacks(renderRunnable)
+        recycleBitmap()
+    }
+
+    private fun recycleBitmap() {
+        cachedBitmap?.recycle()
+        cachedBitmap = null
+        cachedCanvas = null
     }
 
     private fun drawWebViewToSurface() {
@@ -63,31 +74,34 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             if (!isRendering || surfaceContainer == null || !surface.isValid) return@post
 
             try {
-                val w = if (webView.width > 0) webView.width else width
-                val h = if (webView.height > 0) webView.height else height
+                // 비트맵 재사용 (메모리 튕김 완벽 차단)
+                if (cachedBitmap == null || cachedBitmap?.width != width || cachedBitmap?.height != height) {
+                    recycleBitmap()
+                    cachedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                    cachedCanvas = Canvas(cachedBitmap!!)
+                }
 
-                val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                val bitmapCanvas = Canvas(bitmap)
-                webView.draw(bitmapCanvas)
+                val bitmap = cachedBitmap ?: return@post
+                val canvasObj = cachedCanvas ?: return@post
+
+                webView.draw(canvasObj)
 
                 if (surface.isValid) {
-                    val canvas = surface.lockCanvas(null)
-                    if (canvas != null) {
-                        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, width, height, true)
-                        canvas.drawBitmap(scaledBitmap, 0f, 0f, null)
-                        surface.unlockCanvasAndPost(canvas)
-                        if (scaledBitmap != bitmap) scaledBitmap.recycle()
+                    val surfaceCanvas = surface.lockCanvas(null)
+                    if (surfaceCanvas != null) {
+                        surfaceCanvas.drawBitmap(bitmap, 0f, 0f, null)
+                        surface.unlockCanvasAndPost(surfaceCanvas)
                     }
                 }
-                bitmap.recycle()
-            } catch (e: Exception) {
-                e.printStackTrace() // 예외 발생 시 안드로이드 오토 튕김 방지
+            } catch (t: Throwable) {
+                // 어떤 예외/오류가 발생해도 안드로이드 오토 튕김 방지
+                t.printStackTrace()
             }
         }
     }
 
     override fun onGetTemplate(): Template {
-        return try {
+        return runCatching {
             NavigationTemplate.Builder()
                 .setActionStrip(
                     ActionStrip.Builder()
@@ -100,7 +114,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                         .build()
                 )
                 .build()
-        } catch (e: Exception) {
+        }.getOrElse {
             NavigationTemplate.Builder().build()
         }
     }

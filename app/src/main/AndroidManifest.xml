@@ -4,16 +4,30 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
-    <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
         android:allowBackup="true"
-        android:usesCleartextTraffic="true"
-        android:icon="@android:drawable/sym_def_app_icon"
-        android:label="CarrotHUD"
+        android:icon="@mipmap/ic_launcher"
+        android:label="당근HUD"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault">
+        android:theme="@style/Theme.CarrotHUD">
+
+        <!-- [필수] 안드로이드 오토 앱 인식 선언 -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
+        <!-- [필수] 안드로이드 오토 서비스 바인딩 -->
+        <service
+            android:name="com.example.carrothud.CarrotCarAppService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="com.google.android.gms.car.category.CATEGORY_PROJECTION_DEFAULT" />
+            </intent-filter>
+        </service>
 
         <activity
             android:name=".MainActivity"
@@ -24,23 +38,5 @@
             </intent-filter>
         </activity>
 
-        <meta-data
-            android:name="com.google.android.gms.car.application"
-            android:resource="@xml/automotive_app_desc" />
-
-        <meta-data
-            android:name="androidx.car.app.minCarApiLevel"
-            android:value="1" />
-
-        <service
-            android:name=".CarrotCarAppService"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="androidx.car.app.CarAppService" />
-                <category android:name="androidx.car.app.category.NAVIGATION" />
-            </intent-filter>
-        </service>
-
     </application>
-
 </manifest>

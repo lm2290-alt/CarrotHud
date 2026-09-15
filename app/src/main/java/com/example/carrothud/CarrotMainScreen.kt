@@ -18,6 +18,7 @@ import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
@@ -83,13 +84,17 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         while (isRendering) {
             try {
                 val url = URL(urlStr)
-                val conn = url.openConnection()
-                conn.connectTimeout = 3000
-                conn.readTimeout = 5000
-                val inputStream = conn.getInputStream()
+                val conn = (url.openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 4000
+                    readTimeout = 8000
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", "Mozilla/5.0")
+                    setRequestProperty("Accept", "*/*")
+                }
 
+                val inputStream = conn.getInputStream()
                 val buffer = ByteArrayOutputStream()
-                val readBuffer = ByteArray(8192)
+                val readBuffer = ByteArray(16384)
                 var inJpeg = false
                 var lastByte = -1
 
@@ -119,6 +124,8 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                         lastByte = currentByte
                     }
                 }
+                inputStream.close()
+                conn.disconnect()
             } catch (e: Exception) {
                 saveCustomLog("Stream Exception: ${e.localizedMessage}")
                 drawMessage("영상 재연결 중...")
@@ -137,8 +144,11 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             try {
                 canvas = surface.lockCanvas(null)
                 if (canvas != null) {
+                    val targetWidth = if (container.width > 0) container.width else canvas.width
+                    val targetHeight = if (container.height > 0) container.height else canvas.height
+                    
                     val srcRect = Rect(0, 0, bitmap.width, bitmap.height)
-                    val destRect = Rect(0, 0, container.width, container.height)
+                    val destRect = Rect(0, 0, targetWidth, targetHeight)
                     canvas.drawBitmap(bitmap, srcRect, destRect, null)
                 }
             } catch (t: Throwable) {
@@ -161,6 +171,9 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             try {
                 canvas = surface.lockCanvas(null)
                 if (canvas != null) {
+                    val targetWidth = if (container.width > 0) container.width else canvas.width
+                    val targetHeight = if (container.height > 0) container.height else canvas.height
+
                     canvas.drawColor(Color.BLACK)
                     val paint = Paint().apply {
                         color = Color.WHITE
@@ -168,7 +181,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                         textAlign = Paint.Align.CENTER
                         isAntiAlias = true
                     }
-                    canvas.drawText(message, container.width / 2f, container.height / 2f, paint)
+                    canvas.drawText(message, targetWidth / 2f, targetHeight / 2f, paint)
                 }
             } catch (t: Throwable) {
                 saveCustomLog("Message Canvas Crash: ${t.localizedMessage}")

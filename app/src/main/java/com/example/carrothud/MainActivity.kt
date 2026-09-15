@@ -1,6 +1,7 @@
 package com.example.carrothud
 
 import android.os.Bundle
+import android.view.WindowManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -18,10 +19,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 오토 렌더링을 위해 화면 켜짐 유지
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         webView = WebView(this)
         setContentView(webView)
 
-        // 안드로이드 오토 공유용 웹뷰 참조 저장
+        // 오토 그래픽 캡처용 참조 저장
+        HudDataManager.activity = this
         HudDataManager.webView = webView
 
         webView.settings.apply {

@@ -53,48 +53,36 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(webView)
 
-        Toast.makeText(this, "핫스팟 연결된 콤마4 탐색 중...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "연결된 네트워크 대역 감지 및 콤마4 검색 중...", Toast.LENGTH_SHORT).show()
 
-        // 비동기 스캔 시작
+        // 실시간 네트워크 감지 및 7000번 포트 탐색 시작
         CoroutineScope(Dispatchers.Main).launch {
-            val commaIp = autoDiscoverCommaIp()
+            val commaIp = findCommaDevice()
 
             if (commaIp != null) {
                 val targetUrl = "http://$commaIp:7000"
-                Toast.makeText(this@MainActivity, "콤마4 발견! 접속: $targetUrl", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "콤마4 연결 성공: $targetUrl", Toast.LENGTH_LONG).show()
                 webView.loadUrl(targetUrl)
             } else {
-                Toast.makeText(this@MainActivity, "콤마4를 찾을 수 없습니다. 핫스팟 연결을 확인하세요.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "7000번 포트 응답 기기를 찾지 못했습니다.", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    // 스마트폰에 연결된 모든 네트워크 대역에서 7000번 포트가 열린 콤마4 IP 자동 탐색
-    private suspend fun autoDiscoverCommaIp(): String? = withContext(Dispatchers.IO) {
-        val subnets = getAllSubnets()
+    // 1. 폰에 할당된 모든 IP 대역 감지 -> 2. 해당 대역 스캔 -> 3. 7000번 포트 열린 IP 반환
+    private suspend fun findCommaDevice(): String? = withContext(Dispatchers.IO) {
+        // IP 규칙 상관없이 현재 폰의 모든 활성 IPv4 서브넷 추출
+        val subnets = getAllActiveSubnets()
 
-        // 추출된 각 서브넷 대역별로 1~254 병렬 스캔
         for (subnet in subnets) {
-            val deferreds = (2..254).map { host ->
+            // 1~254 전체 IP에 대해 7000번 포트 동시 스캔
+            val deferreds = (1..254).map { host ->
                 async(Dispatchers.IO) {
-                    val testIp = "$subnet.$host"
-                    if (isPortOpen(testIp, 7000, 120)) testIp else null
+                    val targetIp = "$subnet.$host"
+                    if (checkPort7000(targetIp)) targetIp else null
                 }
             }
-            val foundIp = deferreds.awaitAll().filterNotNull().firstOrNull()
-            if (foundIp != null) return@withContext foundIp
-        }
 
-        // 스마트폰 핫스팟 대표 대역들 추가 백업 스캔 (192.168.43, 192.168.49, 172.20.10)
-        val fallbackSubnets = listOf("192.168.43", "192.168.49", "172.20.10")
-        for (subnet in fallbackSubnets) {
-            if (subnets.contains(subnet)) continue
-            val deferreds = (2..254).map { host ->
-                async(Dispatchers.IO) {
-                    val testIp = "$subnet.$host"
-                    if (isPortOpen(testIp, 7000, 120)) testIp else null
-                }
-            }
             val foundIp = deferreds.awaitAll().filterNotNull().firstOrNull()
             if (foundIp != null) return@withContext foundIp
         }
@@ -102,22 +90,23 @@ class MainActivity : AppCompatActivity() {
         return@withContext null
     }
 
-    // 폰의 모든 활성 네트워크 인터페이스(핫스팟, Wi-Fi 등)의 IPv4 서브넷 대역 추출
-    private fun getAllSubnets(): List<String> {
+    // 스마트폰의 모든 네트워크 인터페이스를 조회하여 현재 생성된 모든 IPv4 서브넷(AAA.BBB.CCC)을 자동 감지
+    private fun getAllActiveSubnets(): List<String> {
         val subnets = mutableListOf<String>()
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
             while (interfaces.hasMoreElements()) {
-                val networkInterface = interfaces.nextElement()
-                if (networkInterface.isLoopback || !networkInterface.isUp) continue
+                val netInterface = interfaces.nextElement()
+                val addresses = netInterface.inetAddresses
 
-                val addresses = networkInterface.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val addr = addresses.nextElement()
+                    // Loopback(127.0.0.1)만 제외하고 172.x, 10.x, 192.x 등 모든 IPv4 주소 수집
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
                         val hostAddress = addr.hostAddress ?: continue
-                        if (hostAddress.contains(".")) {
-                            val subnet = hostAddress.substring(0, hostAddress.lastIndexOf("."))
+                        val lastDot = hostAddress.lastIndexOf('.')
+                        if (lastDot != -1) {
+                            val subnet = hostAddress.substring(0, lastDot)
                             if (!subnets.contains(subnet)) {
                                 subnets.add(subnet)
                             }
@@ -131,11 +120,11 @@ class MainActivity : AppCompatActivity() {
         return subnets
     }
 
-    // 특정 IP의 7000번 포트 소켓 오픈 여부 확인
-    private fun isPortOpen(ip: String, port: Int, timeout: Int): Boolean {
+    // 해당 IP의 7000번 포트 연결 시도 (타임아웃 200ms)
+    private fun checkPort7000(ip: String): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, port), timeout)
+                socket.connect(InetSocketAddress(ip, 7000), 200)
                 true
             }
         } catch (e: Exception) {

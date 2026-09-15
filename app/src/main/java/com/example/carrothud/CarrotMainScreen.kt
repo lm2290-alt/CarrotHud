@@ -1,13 +1,10 @@
 package com.example.carrothud
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.view.PixelCopy
 import android.view.Surface
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
@@ -20,174 +17,207 @@ import androidx.car.app.model.PaneTemplate
 import androidx.car.app.model.Row
 import androidx.car.app.model.Template
 import androidx.car.app.navigation.model.NavigationTemplate
+import kotlinx.coroutines.*
+import java.io.ByteArrayOutputStream
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.Socket
+import java.net.URL
+import java.util.Collections
 
 class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCallback {
 
     private var surfaceContainer: SurfaceContainer? = null
-    private val handler = Handler(Looper.getMainLooper())
-    private var isRendering = false
-    private var cachedBitmap: Bitmap? = null
-
-    private val renderRunnable = object : Runnable {
-        override fun run() {
-            if (isRendering) {
-                try {
-                    drawScreenToSurface()
-                } catch (t: Throwable) {
-                    t.printStackTrace()
-                }
-                handler.postDelayed(this, 100) // 10 FPS
-            }
-        }
-    }
+    @Volatile private var isRendering = false
+    private var streamJob: Job? = null
 
     init {
-        try {
+        runCatching {
             carContext.getCarService(androidx.car.app.AppManager::class.java)
                 .setSurfaceCallback(this)
-        } catch (t: Throwable) {
-            t.printStackTrace()
         }
     }
 
     override fun onSurfaceAvailable(surfaceContainer: SurfaceContainer) {
         this.surfaceContainer = surfaceContainer
         isRendering = true
-        handler.removeCallbacks(renderRunnable)
-        handler.post(renderRunnable)
+        startStreamingPipeline()
     }
 
     override fun onSurfaceVisible(surfaceContainer: SurfaceContainer) {
         this.surfaceContainer = surfaceContainer
-        isRendering = true
+        if (!isRendering) {
+            isRendering = true
+            startStreamingPipeline()
+        }
     }
 
     override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
         isRendering = false
+        streamJob?.cancel()
         this.surfaceContainer = null
-        handler.removeCallbacks(renderRunnable)
-        recycleBitmap()
     }
 
-    private fun recycleBitmap() {
-        try {
-            cachedBitmap?.recycle()
-        } catch (t: Throwable) {
-            t.printStackTrace()
-        }
-        cachedBitmap = null
-    }
+    private fun startStreamingPipeline() {
+        streamJob?.cancel()
+        streamJob = CoroutineScope(Dispatchers.IO).launch {
+            drawMessage("콤마4 (7000포트) 동적 IP 탐색 중...")
+            val commaIp = findCommaDeviceIp()
 
-    private fun drawScreenToSurface() {
-        val container = surfaceContainer ?: return
-        val surface = container.surface ?: return
-
-        if (!surface.isValid) return
-
-        val width = container.width
-        val height = container.height
-        if (width <= 0 || height <= 0) return
-
-        val activity = HudDataManager.activity
-
-        if (activity == null || activity.isFinishing || activity.isDestroyed) {
-            drawMessageOnSurface(surface, width, height, "스마트폰에서 CarrotHUD 앱을 실행해 주세요")
-            return
-        }
-
-        val window = try { activity.window } catch (t: Throwable) { null }
-        if (window == null) {
-            drawMessageOnSurface(surface, width, height, "화면 연결 준비 중...")
-            return
-        }
-
-        if (cachedBitmap == null || cachedBitmap?.width != width || cachedBitmap?.height != height) {
-            recycleBitmap()
-            try {
-                cachedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            } catch (t: Throwable) {
-                return
+            if (commaIp == null) {
+                drawMessage("핫스팟에 연결된 콤마4를 찾지 못했습니다")
+                return@launch
             }
+
+            drawMessage("콤마4 연결 성공! 영상 수신 중...")
+            connectAndStream("http://$commaIp:7000")
         }
+    }
 
-        val bitmap = cachedBitmap ?: return
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+    private suspend fun connectAndStream(urlStr: String) {
+        while (isRendering) {
             try {
-                PixelCopy.request(
-                    window,
-                    bitmap,
-                    { copyResult ->
-                        try {
-                            if (isRendering && surface.isValid) {
-                                if (copyResult == PixelCopy.SUCCESS) {
-                                    copyBitmapToSurface(surface, bitmap, width, height)
-                                } else {
-                                    drawMessageOnSurface(surface, width, height, "스마트폰 화면을 켜주세요")
+                val url = URL(urlStr)
+                val conn = url.openConnection()
+                conn.connectTimeout = 3000
+                conn.readTimeout = 5000
+                val inputStream = conn.getInputStream()
+
+                val buffer = ByteArrayOutputStream()
+                val readBuffer = ByteArray(16384)
+                var inJpeg = false
+                var lastByte = -1
+
+                while (isRendering) {
+                    val bytesRead = inputStream.read(readBuffer)
+                    if (bytesRead == -1) break
+
+                    for (i in 0 until bytesRead) {
+                        val currentByte = readBuffer[i].toInt() and 0xFF
+
+                        if (!inJpeg && lastByte == 0xFF && currentByte == 0xD8) {
+                            buffer.reset()
+                            buffer.write(0xFF)
+                            buffer.write(0xD8)
+                            inJpeg = true
+                        } else if (inJpeg) {
+                            buffer.write(currentByte)
+                            if (lastByte == 0xFF && currentByte == 0xD9) {
+                                inJpeg = false
+                                val bytes = buffer.toByteArray()
+                                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                if (bitmap != null) {
+                                    drawBitmapToSurface(bitmap)
                                 }
                             }
-                        } catch (t: Throwable) {
-                            t.printStackTrace()
                         }
-                    },
-                    handler
-                )
-            } catch (t: Throwable) {
-                drawMessageOnSurface(surface, width, height, "화면 캡처 중...")
+                        lastByte = currentByte
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                drawMessage("영상 재연결 시도 중...")
+                delay(1000)
             }
-        } else {
-            drawMessageOnSurface(surface, width, height, "지원되지 않는 안드로이드 버전입니다")
         }
     }
 
-    private fun copyBitmapToSurface(surface: Surface, bitmap: Bitmap, destWidth: Int, destHeight: Int) {
+    private fun drawBitmapToSurface(bitmap: Bitmap) {
+        val container = surfaceContainer ?: return
+        val surface = container.surface ?: return
+        if (!surface.isValid || !isRendering) return
+
         var canvas: android.graphics.Canvas? = null
         try {
-            if (!surface.isValid) return
             canvas = surface.lockCanvas(null)
             if (canvas != null) {
                 val srcRect = Rect(0, 0, bitmap.width, bitmap.height)
-                val destRect = Rect(0, 0, destWidth, destHeight)
+                val destRect = Rect(0, 0, container.width, container.height)
                 canvas.drawBitmap(bitmap, srcRect, destRect, null)
             }
         } catch (t: Throwable) {
             t.printStackTrace()
         } finally {
             if (canvas != null) {
-                try {
-                    surface.unlockCanvasAndPost(canvas)
-                } catch (t: Throwable) {
-                    t.printStackTrace()
-                }
+                runCatching { surface.unlockCanvasAndPost(canvas) }
             }
         }
     }
 
-    private fun drawMessageOnSurface(surface: Surface, width: Int, height: Int, message: String) {
+    private fun drawMessage(message: String) {
+        val container = surfaceContainer ?: return
+        val surface = container.surface ?: return
+        if (!surface.isValid) return
+
         var canvas: android.graphics.Canvas? = null
         try {
-            if (!surface.isValid) return
             canvas = surface.lockCanvas(null)
             if (canvas != null) {
                 canvas.drawColor(Color.BLACK)
                 val paint = Paint().apply {
                     color = Color.WHITE
-                    textSize = 40f
+                    textSize = 36f
                     textAlign = Paint.Align.CENTER
                     isAntiAlias = true
                 }
-                canvas.drawText(message, width / 2f, height / 2f, paint)
+                canvas.drawText(message, container.width / 2f, container.height / 2f, paint)
             }
         } catch (t: Throwable) {
             t.printStackTrace()
         } finally {
             if (canvas != null) {
-                try {
-                    surface.unlockCanvasAndPost(canvas)
-                } catch (t: Throwable) {
-                    t.printStackTrace()
+                runCatching { surface.unlockCanvasAndPost(canvas) }
+            }
+        }
+    }
+
+    private suspend fun findCommaDeviceIp(): String? = coroutineScope {
+        val localSubnets = getLocalSubnets()
+        val candidateSubnets = (localSubnets + listOf("192.168.43", "192.168.12", "172.20.10", "192.168.0", "192.168.1")).distinct()
+
+        for (subnet in candidateSubnets) {
+            val tasks = (2..254).map { i ->
+                async(Dispatchers.IO) {
+                    val testIp = "$subnet.$i"
+                    if (isPortOpen(testIp, 7000, 200)) testIp else null
                 }
             }
+            val foundIp = tasks.awaitAll().firstOrNull { it != null }
+            if (foundIp != null) return@coroutineScope foundIp
+        }
+        null
+    }
+
+    private fun getLocalSubnets(): List<String> {
+        val subnets = mutableListOf<String>()
+        try {
+            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+            for (intf in interfaces) {
+                val addrs = Collections.list(intf.inetAddresses)
+                for (addr in addrs) {
+                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                        val hostAddress = addr.hostAddress ?: continue
+                        val lastDot = hostAddress.lastIndexOf('.')
+                        if (lastDot > 0) {
+                            subnets.add(hostAddress.substring(0, lastDot))
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return subnets
+    }
+
+    private fun isPortOpen(ip: String, port: Int, timeoutMs: Int): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(ip, port), timeoutMs)
+                true
+            }
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -198,8 +228,8 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     ActionStrip.Builder()
                         .addAction(
                             Action.Builder()
-                                .setTitle("새로고침")
-                                .setOnClickListener { invalidate() }
+                                .setTitle("재탐색")
+                                .setOnClickListener { startStreamingPipeline() }
                                 .build()
                         )
                         .build()

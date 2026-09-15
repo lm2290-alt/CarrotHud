@@ -30,6 +30,11 @@
             </intent-filter>
         </service>
 
+        <!-- 안드로이드 오토 앱 설정 디스크립터 연결 (필수) -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
         <!-- 안드로이드 오토 최소 API 레벨 -->
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"

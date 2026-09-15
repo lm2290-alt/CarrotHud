@@ -35,4 +35,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.squareup.okhttp3:okhttp:4.11.0")
+    
+    // 오토 라이브러리는 반드시 이 대괄호 안에 들어와 있어야 합니다!
+    implementation("androidx.car.app:app:1.3.0")
+    implementation("androidx.car.app:app-automotive:1.3.0")
 }

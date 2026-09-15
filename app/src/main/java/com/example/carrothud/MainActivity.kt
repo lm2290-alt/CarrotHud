@@ -11,7 +11,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -61,14 +60,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 스캔 상태 표시용 텍스트뷰
         statusTextView = TextView(this).apply {
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             setBackgroundColor(Color.parseColor("#CC000000"))
             setPadding(40, 40, 40, 40)
             gravity = Gravity.CENTER
-            text = "네트워크 인터페이스 감지 중..."
+            text = "콤마 기기 IP 탐색 중..."
         }
 
         layoutContainer.addView(webView)
@@ -84,12 +82,11 @@ class MainActivity : AppCompatActivity() {
 
             if (commaIp != null) {
                 val targetUrl = "http://$commaIp:7000"
-                statusTextView.text = "콤마4 발견!\n접속: $targetUrl"
+                statusTextView.text = "콤마 발견!\n접속: $targetUrl"
                 
-                // 접속 성공 시 1초 뒤 스캔 레이어 숨기고 웹뷰 표시
                 statusTextView.postDelayed({
                     statusTextView.visibility = View.GONE
-                }, 1000)
+                }, 800)
                 
                 webView.loadUrl(targetUrl)
             } else {
@@ -99,18 +96,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun findCommaDevice(): String? = withContext(Dispatchers.IO) {
+        // 1. 게이트웨이(공유기/콤마 본체 주소 추정) 먼저 빠르게 단독 테스트 (.1 또는 .254 등)
         val subnets = getAllActiveSubnets()
-
-        if (subnets.isEmpty()) {
-            withContext(Dispatchers.Main) {
-                statusTextView.text = "활성화된 네트워크 대역을 찾을 수 없습니다."
+        for (subnet in subnets) {
+            val gatewayCandidates = listOf("$subnet.1", "$subnet.254", "$subnet.2", "$subnet.100")
+            for (ip in gatewayCandidates) {
+                if (checkPort7000(ip)) {
+                    return@withContext ip
+                }
             }
-            return@withContext null
         }
+
+        // 2. 안 잡히면 전체 대역 병렬 스캔
+        if (subnets.isEmpty()) return@withContext null
 
         for (subnet in subnets) {
             withContext(Dispatchers.Main) {
-                statusTextView.text = "스캔 중: $subnet.1 ~ 254 (포트 7000)"
+                statusTextView.text = "정밀 스캔 중: $subnet.1 ~ 254"
             }
 
             val deferreds = (1..254).map { host ->
@@ -158,7 +160,7 @@ class MainActivity : AppCompatActivity() {
     private fun checkPort7000(ip: String): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, 7000), 120)
+                socket.connect(InetSocketAddress(ip, 7000), 100)
                 true
             }
         } catch (e: Exception) {

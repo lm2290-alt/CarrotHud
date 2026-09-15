@@ -1,9 +1,10 @@
 package com.example.carrothud
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.PixelCopy
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
@@ -19,14 +20,12 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private val handler = Handler(Looper.getMainLooper())
     private var isRendering = false
 
-    // 메모리 누수 방지용 캐시 버퍼
     private var cachedBitmap: Bitmap? = null
-    private var cachedCanvas: Canvas? = null
 
     private val renderRunnable = object : Runnable {
         override fun run() {
             if (isRendering) {
-                drawWebViewToSurface()
+                drawScreenToSurface()
                 handler.postDelayed(this, 100) // 10 FPS
             }
         }
@@ -56,13 +55,12 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private fun recycleBitmap() {
         cachedBitmap?.recycle()
         cachedBitmap = null
-        cachedCanvas = null
     }
 
-    private fun drawWebViewToSurface() {
+    private fun drawScreenToSurface() {
+        val activity = HudDataManager.activity ?: return
         val container = surfaceContainer ?: return
         val surface = container.surface ?: return
-        val webView = HudDataManager.webView ?: return
 
         if (!surface.isValid) return
 
@@ -70,32 +68,35 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         val height = container.height
         if (width <= 0 || height <= 0) return
 
-        handler.post {
-            if (!isRendering || surfaceContainer == null || !surface.isValid) return@post
+        if (cachedBitmap == null || cachedBitmap?.width != width || cachedBitmap?.height != height) {
+            recycleBitmap()
+            cachedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        }
 
+        val bitmap = cachedBitmap ?: return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                // 비트맵 재사용 (메모리 튕김 완벽 차단)
-                if (cachedBitmap == null || cachedBitmap?.width != width || cachedBitmap?.height != height) {
-                    recycleBitmap()
-                    cachedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                    cachedCanvas = Canvas(cachedBitmap!!)
-                }
-
-                val bitmap = cachedBitmap ?: return@post
-                val canvasObj = cachedCanvas ?: return@post
-
-                webView.draw(canvasObj)
-
-                if (surface.isValid) {
-                    val surfaceCanvas = surface.lockCanvas(null)
-                    if (surfaceCanvas != null) {
-                        surfaceCanvas.drawBitmap(bitmap, 0f, 0f, null)
-                        surface.unlockCanvasAndPost(surfaceCanvas)
-                    }
-                }
-            } catch (t: Throwable) {
-                // 어떤 예외/오류가 발생해도 안드로이드 오토 튕김 방지
-                t.printStackTrace()
+                PixelCopy.request(
+                    activity.window,
+                    bitmap,
+                    { copyResult ->
+                        if (copyResult == PixelCopy.SUCCESS && isRendering && surface.isValid) {
+                            try {
+                                val canvas = surface.lockCanvas(null)
+                                if (canvas != null) {
+                                    canvas.drawBitmap(bitmap, 0f, 0f, null)
+                                    surface.unlockCanvasAndPost(canvas)
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                    },
+                    handler
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }

@@ -5,16 +5,12 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
-import android.view.Surface
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
-import androidx.car.app.model.Pane
-import androidx.car.app.model.PaneTemplate
-import androidx.car.app.model.Row
 import androidx.car.app.model.Template
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
@@ -53,15 +49,17 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private fun startStreamingPipeline() {
         streamJob?.cancel()
         streamJob = CoroutineScope(Dispatchers.IO).launch {
-            drawMessage("콤마4 (7000포트) 동적 IP 탐색 중...")
+            drawMessage("콤마4 연결 대기 중...")
             val commaIp = findCommaDeviceIp()
 
             if (commaIp == null) {
-                drawMessage("핫스팟에 연결된 콤마4를 찾지 못했습니다")
+                drawMessage("콤마4 기기를 찾는 중입니다...")
+                delay(2000)
+                startStreamingPipeline()
                 return@launch
             }
 
-            drawMessage("콤마4 연결 성공! 영상 수신 중...")
+            drawMessage("영상 스트리밍 연결 중...")
             connectAndStream("http://$commaIp:7000")
         }
     }
@@ -76,7 +74,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 val inputStream = conn.getInputStream()
 
                 val buffer = ByteArrayOutputStream()
-                val readBuffer = ByteArray(16384)
+                val readBuffer = ByteArray(8192)
                 var inJpeg = false
                 var lastByte = -1
 
@@ -107,9 +105,8 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
-                drawMessage("영상 재연결 시도 중...")
-                delay(1000)
+                drawMessage("재연결 중...")
+                delay(2000)
             }
         }
     }
@@ -128,7 +125,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 canvas.drawBitmap(bitmap, srcRect, destRect, null)
             }
         } catch (t: Throwable) {
-            t.printStackTrace()
+            // 무시 (크래시 방지)
         } finally {
             if (canvas != null) {
                 runCatching { surface.unlockCanvasAndPost(canvas) }
@@ -148,14 +145,14 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 canvas.drawColor(Color.BLACK)
                 val paint = Paint().apply {
                     color = Color.WHITE
-                    textSize = 36f
+                    textSize = 32f
                     textAlign = Paint.Align.CENTER
                     isAntiAlias = true
                 }
                 canvas.drawText(message, container.width / 2f, container.height / 2f, paint)
             }
         } catch (t: Throwable) {
-            t.printStackTrace()
+            // 무시 (크래시 방지)
         } finally {
             if (canvas != null) {
                 runCatching { surface.unlockCanvasAndPost(canvas) }
@@ -168,10 +165,10 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         val candidateSubnets = (localSubnets + listOf("192.168.43", "192.168.12", "172.20.10", "192.168.0", "192.168.1")).distinct()
 
         for (subnet in candidateSubnets) {
-            val tasks = (2..254).map { i ->
+            val tasks = (2..50).map { i ->
                 async(Dispatchers.IO) {
                     val testIp = "$subnet.$i"
-                    if (isPortOpen(testIp, 7000, 200)) testIp else null
+                    if (isPortOpen(testIp, 7000, 150)) testIp else null
                 }
             }
             val foundIp = tasks.awaitAll().firstOrNull { it != null }
@@ -197,7 +194,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            // 무시
         }
         return subnets
     }
@@ -214,25 +211,17 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     }
 
     override fun onGetTemplate(): Template {
-        return try {
-            NavigationTemplate.Builder()
-                .setActionStrip(
-                    ActionStrip.Builder()
-                        .addAction(
-                            Action.Builder()
-                                .setTitle("재탐색")
-                                .setOnClickListener { startStreamingPipeline() }
-                                .build()
-                        )
-                        .build()
-                )
-                .build()
-        } catch (t: Throwable) {
-            PaneTemplate.Builder(
-                Pane.Builder()
-                    .addRow(Row.Builder().setTitle("CarrotHUD 실행 중").build())
+        return NavigationTemplate.Builder()
+            .setActionStrip(
+                ActionStrip.Builder()
+                    .addAction(
+                        Action.Builder()
+                            .setTitle("재시도")
+                            .setOnClickListener { startStreamingPipeline() }
+                            .build()
+                    )
                     .build()
-            ).setTitle("CarrotHUD").build()
-        }
+            )
+            .build()
     }
 }

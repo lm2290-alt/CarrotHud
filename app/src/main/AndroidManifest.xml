@@ -9,12 +9,12 @@
 
     <application
         android:allowBackup="true"
+        android:usesCleartextTraffic="true"
         android:icon="@android:drawable/sym_def_app_icon"
         android:label="CarrotHUD"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault">
 
-        <!-- 스마트폰 실행용 Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -32,7 +32,6 @@
             android:name="androidx.car.app.minCarApiLevel"
             android:value="1" />
 
-        <!-- 안드로이드 오토 서비스 -->
         <service
             android:name=".CarrotCarAppService"
             android:exported="true">

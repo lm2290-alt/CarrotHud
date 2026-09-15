@@ -8,18 +8,14 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
-        android:label="당근HUD"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.CarrotHUD">
+        android:supportsRtl="true">
 
-        <!-- [필수] 안드로이드 오토 앱 인식 선언 -->
+        <!-- 안드로이드 오토 앱 인식용 메타데이터 -->
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />
 
-        <!-- [필수] 안드로이드 오토 서비스 바인딩 -->
+        <!-- 안드로이드 오토 서비스 바인딩 -->
         <service
             android:name="com.example.carrothud.CarrotCarAppService"
             android:exported="true">

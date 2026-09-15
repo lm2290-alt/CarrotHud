@@ -19,7 +19,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         override fun run() {
             drawWebViewToSurface()
             if (isRendering) {
-                handler.postDelayed(this, 33) // 초당 30프레임 실시간 화면 프레임 전송
+                handler.postDelayed(this, 33)
             }
         }
     }

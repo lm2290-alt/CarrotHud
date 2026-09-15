@@ -12,6 +12,8 @@ import androidx.car.app.SurfaceContainer
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
 import androidx.car.app.model.Template
+import androidx.car.app.navigation.NavigationManager
+import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
@@ -27,24 +29,36 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private var surfaceContainer: SurfaceContainer? = null
     @Volatile private var isRendering = false
     private var streamJob: Job? = null
+    private val renderLock = Any()
 
     init {
         runCatching {
+            val navigationManager = carContext.getCarService(NavigationManager::class.java)
+            navigationManager.setNavigationManagerCallback(object : NavigationManagerCallback {
+                override fun onStopNavigation() {}
+            })
+
             carContext.getCarService(androidx.car.app.AppManager::class.java)
                 .setSurfaceCallback(this)
+        }.onFailure { e ->
+            saveCustomLog("Init Exception: ${e.localizedMessage}")
         }
     }
 
     override fun onSurfaceAvailable(surfaceContainer: SurfaceContainer) {
-        this.surfaceContainer = surfaceContainer
-        isRendering = true
+        synchronized(renderLock) {
+            this.surfaceContainer = surfaceContainer
+            isRendering = true
+        }
         startStreamingPipeline()
     }
 
     override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
-        isRendering = false
-        streamJob?.cancel()
-        this.surfaceContainer = null
+        synchronized(renderLock) {
+            isRendering = false
+            streamJob?.cancel()
+            this.surfaceContainer = null
+        }
     }
 
     private fun startStreamingPipeline() {
@@ -56,7 +70,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             if (commaIp == null) {
                 drawMessage("콤마4(포트 7000)를 찾지 못함")
                 delay(2000)
-                startStreamingPipeline()
+                if (isRendering) startStreamingPipeline()
                 return@launch
             }
 
@@ -114,70 +128,75 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     }
 
     private fun drawBitmapToSurface(bitmap: Bitmap) {
-        val container = surfaceContainer ?: return
-        val surface = container.surface ?: return
-        if (!surface.isValid || !isRendering) return
+        synchronized(renderLock) {
+            val container = surfaceContainer ?: return
+            val surface = container.surface ?: return
+            if (!surface.isValid || !isRendering) return
 
-        var canvas: android.graphics.Canvas? = null
-        try {
-            canvas = surface.lockCanvas(null)
-            if (canvas != null) {
-                val srcRect = Rect(0, 0, bitmap.width, bitmap.height)
-                val destRect = Rect(0, 0, container.width, container.height)
-                canvas.drawBitmap(bitmap, srcRect, destRect, null)
-            }
-        } catch (t: Throwable) {
-            saveCustomLog("Draw Canvas Crash: ${t.localizedMessage}")
-        } finally {
-            if (canvas != null) {
-                runCatching { surface.unlockCanvasAndPost(canvas) }
+            var canvas: android.graphics.Canvas? = null
+            try {
+                canvas = surface.lockCanvas(null)
+                if (canvas != null) {
+                    val srcRect = Rect(0, 0, bitmap.width, bitmap.height)
+                    val destRect = Rect(0, 0, container.width, container.height)
+                    canvas.drawBitmap(bitmap, srcRect, destRect, null)
+                }
+            } catch (t: Throwable) {
+                saveCustomLog("Draw Canvas Crash: ${t.localizedMessage}")
+            } finally {
+                if (canvas != null) {
+                    runCatching { surface.unlockCanvasAndPost(canvas) }
+                }
             }
         }
     }
 
     private fun drawMessage(message: String) {
-        val container = surfaceContainer ?: return
-        val surface = container.surface ?: return
-        if (!surface.isValid) return
+        synchronized(renderLock) {
+            val container = surfaceContainer ?: return
+            val surface = container.surface ?: return
+            if (!surface.isValid || !isRendering) return
 
-        var canvas: android.graphics.Canvas? = null
-        try {
-            canvas = surface.lockCanvas(null)
-            if (canvas != null) {
-                canvas.drawColor(Color.BLACK)
-                val paint = Paint().apply {
-                    color = Color.WHITE
-                    textSize = 32f
-                    textAlign = Paint.Align.CENTER
-                    isAntiAlias = true
+            var canvas: android.graphics.Canvas? = null
+            try {
+                canvas = surface.lockCanvas(null)
+                if (canvas != null) {
+                    canvas.drawColor(Color.BLACK)
+                    val paint = Paint().apply {
+                        color = Color.WHITE
+                        textSize = 32f
+                        textAlign = Paint.Align.CENTER
+                        isAntiAlias = true
+                    }
+                    canvas.drawText(message, container.width / 2f, container.height / 2f, paint)
                 }
-                canvas.drawText(message, container.width / 2f, container.height / 2f, paint)
-            }
-        } catch (t: Throwable) {
-            saveCustomLog("Message Canvas Crash: ${t.localizedMessage}")
-        } finally {
-            if (canvas != null) {
-                runCatching { surface.unlockCanvasAndPost(canvas) }
+            } catch (t: Throwable) {
+                saveCustomLog("Message Canvas Crash: ${t.localizedMessage}")
+            } finally {
+                if (canvas != null) {
+                    runCatching { surface.unlockCanvasAndPost(canvas) }
+                }
             }
         }
     }
 
     private fun saveCustomLog(msg: String) {
         runCatching {
-            val file = File(carContext.getExternalFilesDir(null), "carrot_crash.txt")
+            val file = File(carContext.filesDir, "carrot_crash.txt")
             file.appendText("${java.util.Date()}: $msg\n")
         }
     }
 
     private suspend fun findCommaDeviceIp(): String? = coroutineScope {
         val localSubnets = getLocalSubnets()
-        val candidateSubnets = (localSubnets + listOf("192.168.43", "192.168.12", "172.20.10", "192.168.0", "192.168.1")).distinct()
+        val candidateSubnets = (localSubnets + listOf("192.168.43", "192.168.12", "172.20.10", "192.168.0", "192.168.1", "192.168.42", "10.42.0")).distinct()
 
         for (subnet in candidateSubnets) {
-            val tasks = (2..50).map { i ->
+            // 탐색 대역을 2부터 254 전체로 확장
+            val tasks = (2..254).map { i ->
                 async(Dispatchers.IO) {
                     val testIp = "$subnet.$i"
-                    if (isPortOpen(testIp, 7000, 150)) testIp else null
+                    if (isPortOpen(testIp, 7000, 100)) testIp else null
                 }
             }
             val foundIp = tasks.awaitAll().firstOrNull { it != null }

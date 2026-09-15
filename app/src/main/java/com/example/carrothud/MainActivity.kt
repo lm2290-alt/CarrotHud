@@ -21,7 +21,7 @@ class MainActivity : AppCompatActivity() {
         webView = WebView(this)
         setContentView(webView)
 
-        // 안드로이드 오토 렌더링용 웹뷰 공유
+        // 안드로이드 오토 공유용 웹뷰 참조 저장
         HudDataManager.webView = webView
 
         webView.settings.apply {

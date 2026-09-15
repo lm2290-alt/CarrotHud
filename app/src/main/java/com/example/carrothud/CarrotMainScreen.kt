@@ -189,14 +189,16 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
     private suspend fun findCommaDeviceIp(): String? = coroutineScope {
         val localSubnets = getLocalSubnets()
-        val candidateSubnets = (localSubnets + listOf("192.168.43", "192.168.12", "172.20.10", "192.168.0", "192.168.1", "192.168.42", "10.42.0")).distinct()
+        val candidateSubnets = (localSubnets + listOf(
+            "192.168.43", "192.168.42", "192.168.137", "192.168.225",
+            "172.20.10", "10.42.0", "192.168.0", "192.168.1", "192.168.8"
+        )).distinct()
 
         for (subnet in candidateSubnets) {
-            // 탐색 대역을 2부터 254 전체로 확장
             val tasks = (2..254).map { i ->
                 async(Dispatchers.IO) {
                     val testIp = "$subnet.$i"
-                    if (isPortOpen(testIp, 7000, 100)) testIp else null
+                    if (isPortOpen(testIp, 7000, 250)) testIp else null
                 }
             }
             val foundIp = tasks.awaitAll().firstOrNull { it != null }

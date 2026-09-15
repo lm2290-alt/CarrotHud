@@ -2,7 +2,6 @@ package com.example.carrothud
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.net.DhcpInfo
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.webkit.WebSettings
@@ -10,9 +9,14 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import java.math.BigInteger
-import java.net.InetAddress
-import java.nio.ByteOrder
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.InetSocketAddress
+import java.net.Socket
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,7 +39,6 @@ class MainActivity : AppCompatActivity() {
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    // 사이드바 및 불필요한 UI 숨김 처리
                     view?.evaluateJavascript(
                         """
                         (function() {
@@ -50,36 +53,68 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(webView)
 
-        // 자동 감지된 IP로 접속 시도
-        val targetIp = getGatewayIp()
-        val targetUrl = "http://$targetIp:7000"
+        Toast.makeText(this, "본체 IP 탐색 중...", Toast.LENGTH_SHORT).show()
 
-        Toast.makeText(this, "접속 주소: $targetUrl", Toast.LENGTH_SHORT).show()
-        webView.loadUrl(targetUrl)
+        lifecycleScope.launch {
+            val detectedIp = scanNetworkForDevice()
+            val targetUrl = "http://$detectedIp:7000"
+            
+            Toast.makeText(this@MainActivity, "접속: $targetUrl", Toast.LENGTH_SHORT).show()
+            webView.loadUrl(targetUrl)
+        }
     }
 
-    // 핫스팟/Wi-Fi 네트워크의 게이트웨이 IP(본체 IP 대역) 자동 추출 함수
-    private fun getGatewayIp(): String {
-        return try {
-            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val dhcpInfo: DhcpInfo = wifiManager.dhcpInfo
-            var gateway = dhcpInfo.gateway
+    private suspend fun scanNetworkForDevice(): String = withContext(Dispatchers.IO) {
+        // 내 폰의 핫스팟/Wi-Fi Subnet 추출 시도
+        val myIp = getLocalIpAddress()
+        val subnetBase = if (myIp.contains(".")) {
+            myIp.substring(0, myIp.lastIndexOf("."))
+        } else {
+            "192.168.43" // 실패시 삼성/일반 안드로이드 기본 핫스팟 대역
+        }
 
-            if (ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN) {
-                gateway = Integer.reverseBytes(gateway)
+        // 1~50 범위 비동기 병렬 스캔 (속도 최적화)
+        val deferreds = (2..50).map { i ->
+            async(Dispatchers.IO) {
+                val testIp = "$subnetBase.$i"
+                if (checkPort(testIp, 7000, 150)) testIp else null
             }
+        }
 
-            val gatewayBytes = BigInteger.valueOf(gateway.toLong()).toByteArray()
-            val ipAddress = InetAddress.getByAddress(gatewayBytes)
-            
-            val ipString = ipAddress.hostAddress
-            if (ipString.isNullOrEmpty() || ipString == "0.0.0.0") {
-                "10.239.225.61" // 감지 실패 시 기본값
-            } else {
-                ipString
+        val results = deferreds.awaitAll().filterNotNull()
+
+        if (results.isNotEmpty()) {
+            results[0]
+        } else {
+            // 탐색 안될 시 기존 수동 고정 IP 사용
+            "10.239.225.61"
+        }
+    }
+
+    private fun checkPort(ip: String, port: Int, timeout: Int): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(ip, port), timeout)
+                true
             }
         } catch (e: Exception) {
-            "10.239.225.61" // 예외 발생 시 기존 IP로 대체
+            false
+        }
+    }
+
+    private fun getLocalIpAddress(): String {
+        return try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val ip = wifiManager.dhcpInfo.gateway
+            String.format(
+                "%d.%d.%d.%d",
+                ip and 0xff,
+                ip shr 8 and 0xff,
+                ip shr 16 and 0xff,
+                ip shr 24 and 0xff
+            )
+        } catch (e: Exception) {
+            "192.168.43.1"
         }
     }
 }

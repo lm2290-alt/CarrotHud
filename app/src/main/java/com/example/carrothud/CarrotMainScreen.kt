@@ -3,16 +3,21 @@ package com.example.carrothud
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.PixelCopy
+import android.view.Surface
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
+import androidx.car.app.model.Pane
+import androidx.car.app.model.PaneTemplate
+import androidx.car.app.model.Row
 import androidx.car.app.model.Template
 import androidx.car.app.navigation.model.NavigationTemplate
 
@@ -26,16 +31,22 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private val renderRunnable = object : Runnable {
         override fun run() {
             if (isRendering) {
-                drawScreenToSurface()
+                try {
+                    drawScreenToSurface()
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
                 handler.postDelayed(this, 100) // 10 FPS
             }
         }
     }
 
     init {
-        runCatching {
+        try {
             carContext.getCarService(androidx.car.app.AppManager::class.java)
                 .setSurfaceCallback(this)
+        } catch (t: Throwable) {
+            t.printStackTrace()
         }
     }
 
@@ -46,6 +57,11 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         handler.post(renderRunnable)
     }
 
+    override fun onSurfaceVisible(surfaceContainer: SurfaceContainer) {
+        this.surfaceContainer = surfaceContainer
+        isRendering = true
+    }
+
     override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
         isRendering = false
         this.surfaceContainer = null
@@ -54,13 +70,18 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     }
 
     private fun recycleBitmap() {
-        cachedBitmap?.recycle()
+        try {
+            cachedBitmap?.recycle()
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
         cachedBitmap = null
     }
 
     private fun drawScreenToSurface() {
         val container = surfaceContainer ?: return
         val surface = container.surface ?: return
+
         if (!surface.isValid) return
 
         val width = container.width
@@ -69,72 +90,109 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
         val activity = HudDataManager.activity
 
-        // Activity가 없거나 화면이 꺼졌을 때 오토가 튕기지 않도록 대기 텍스트 출력
-        if (activity == null || activity.isFinishing || activity.isDestroyed || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            drawFallbackText(surface, width, height, "휴대폰 CarrotHUD 앱을 켜주세요")
+        if (activity == null || activity.isFinishing || activity.isDestroyed) {
+            drawMessageOnSurface(surface, width, height, "스마트폰에서 CarrotHUD 앱을 실행해 주세요")
             return
         }
 
-        val decorView = activity.window?.decorView
-        if (decorView == null || !decorView.isAttachedToWindow) {
-            drawFallbackText(surface, width, height, "화면 연결 대기 중...")
+        val window = try { activity.window } catch (t: Throwable) { null }
+        if (window == null) {
+            drawMessageOnSurface(surface, width, height, "화면 연결 준비 중...")
             return
         }
 
         if (cachedBitmap == null || cachedBitmap?.width != width || cachedBitmap?.height != height) {
             recycleBitmap()
-            cachedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            try {
+                cachedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            } catch (t: Throwable) {
+                return
+            }
         }
 
         val bitmap = cachedBitmap ?: return
 
-        try {
-            PixelCopy.request(
-                activity.window,
-                bitmap,
-                { copyResult ->
-                    if (isRendering && surface.isValid) {
-                        if (copyResult == PixelCopy.SUCCESS) {
-                            renderBitmapToSurface(surface, bitmap)
-                        } else {
-                            drawFallbackText(surface, width, height, "휴대폰 화면을 켜두세요")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                PixelCopy.request(
+                    window,
+                    bitmap,
+                    { copyResult ->
+                        try {
+                            if (isRendering && surface.isValid) {
+                                if (copyResult == PixelCopy.SUCCESS) {
+                                    copyBitmapToSurface(surface, bitmap, width, height)
+                                } else {
+                                    drawMessageOnSurface(surface, width, height, "스마트폰 화면을 켜주세요")
+                                }
+                            }
+                        } catch (t: Throwable) {
+                            t.printStackTrace()
                         }
-                    }
-                },
-                handler
-            )
-        } catch (t: Throwable) {
-            drawFallbackText(surface, width, height, "실시간 화면 수신 중...")
-        }
-    }
-
-    private fun renderBitmapToSurface(surface: android.view.Surface, bitmap: Bitmap) {
-        runCatching {
-            val canvas = surface.lockCanvas(null) ?: return@runCatching
-            canvas.drawBitmap(bitmap, 0f, 0f, null)
-            surface.unlockCanvasAndPost(canvas)
-        }
-    }
-
-    private fun drawFallbackText(surface: android.view.Surface, width: Int, height: Int, text: String) {
-        runCatching {
-            if (!surface.isValid) return@runCatching
-            val canvas = surface.lockCanvas(null) ?: return@runCatching
-            canvas.drawColor(Color.BLACK)
-
-            val paint = Paint().apply {
-                color = Color.WHITE
-                textSize = 36f
-                textAlign = Paint.Align.CENTER
-                isAntiAlias = true
+                    },
+                    handler
+                )
+            } catch (t: Throwable) {
+                drawMessageOnSurface(surface, width, height, "화면 캡처 중...")
             }
-            canvas.drawText(text, width / 2f, height / 2f, paint)
-            surface.unlockCanvasAndPost(canvas)
+        } else {
+            drawMessageOnSurface(surface, width, height, "지원되지 않는 안드로이드 버전입니다")
+        }
+    }
+
+    private fun copyBitmapToSurface(surface: Surface, bitmap: Bitmap, destWidth: Int, destHeight: Int) {
+        var canvas: android.graphics.Canvas? = null
+        try {
+            if (!surface.isValid) return
+            canvas = surface.lockCanvas(null)
+            if (canvas != null) {
+                val srcRect = Rect(0, 0, bitmap.width, bitmap.height)
+                val destRect = Rect(0, 0, destWidth, destHeight)
+                canvas.drawBitmap(bitmap, srcRect, destRect, null)
+            }
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        } finally {
+            if (canvas != null) {
+                try {
+                    surface.unlockCanvasAndPost(canvas)
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+        }
+    }
+
+    private fun drawMessageOnSurface(surface: Surface, width: Int, height: Int, message: String) {
+        var canvas: android.graphics.Canvas? = null
+        try {
+            if (!surface.isValid) return
+            canvas = surface.lockCanvas(null)
+            if (canvas != null) {
+                canvas.drawColor(Color.BLACK)
+                val paint = Paint().apply {
+                    color = Color.WHITE
+                    textSize = 40f
+                    textAlign = Paint.Align.CENTER
+                    isAntiAlias = true
+                }
+                canvas.drawText(message, width / 2f, height / 2f, paint)
+            }
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        } finally {
+            if (canvas != null) {
+                try {
+                    surface.unlockCanvasAndPost(canvas)
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
         }
     }
 
     override fun onGetTemplate(): Template {
-        return runCatching {
+        return try {
             NavigationTemplate.Builder()
                 .setActionStrip(
                     ActionStrip.Builder()
@@ -147,8 +205,12 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                         .build()
                 )
                 .build()
-        }.getOrElse {
-            NavigationTemplate.Builder().build()
+        } catch (t: Throwable) {
+            PaneTemplate.Builder(
+                Pane.Builder()
+                    .addRow(Row.Builder().setTitle("CarrotHUD 실행 중").build())
+                    .build()
+            ).setTitle("CarrotHUD").build()
         }
     }
 }

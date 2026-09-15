@@ -6,8 +6,10 @@ import androidx.car.app.validation.HostValidator
 
 class CarrotCarAppService : CarAppService() {
     override fun createHostValidator(): HostValidator {
-        // 개발/디버그용: 모든 호스트 접속 허용
-        return HostValidator.ALLOW_ALL_HOSTS_DEBUG
+        // 1.4.0 정식 라이브러리에 맞춘 디버그 샘플 호스트 허용 설정
+        return HostValidator.Builder(applicationContext)
+            .addAllowedHosts(androidx.car.app.R.array.hosts_allowlist_sample)
+            .build()
     }
 
     override fun onCreateSession(): Session {

@@ -14,22 +14,29 @@ android {
         versionCode = 1
         versionName = "1.0"
     }
+
     buildTypes {
         release {
             isMinifyEnabled = false
         }
     }
+
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
+
     kotlinOptions {
         jvmTarget = "17"
     }
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.10.1")
+    implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("com.squareup.okhttp3:okhttp:4.10.0")
+    implementation("com.squareup.okhttp3:okhttp:4.11.0")
+
+    // --- 안드로이드 오토 카 앱 라이브러리 추가 ---
+    implementation("androidx.car.app:app:1.3.0")
+    implementation("androidx.car.app:app-automotive:1.3.0")
 }

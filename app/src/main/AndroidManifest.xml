@@ -2,21 +2,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.example.carrothud">
 
-    <!-- 인터넷 및 네트워크 권한 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    
-    <!-- 안드로이드 오토 내비게이션 및 서피스 그려주기 권한 -->
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
     <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
 
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@android:drawable/sym_def_app_icon"
         android:label="CarrotHUD"
-        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault">
+
+        <!-- 스마트폰 화면 (로그 바로 보기용) -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <meta-data
             android:name="com.google.android.gms.car.application"
@@ -26,7 +32,7 @@
             android:name="androidx.car.app.minCarApiLevel"
             android:value="1" />
 
-        <!-- 안드로이드 오토 서비스 등록 -->
+        <!-- 안드로이드 오토 카 서비스 -->
         <service
             android:name=".CarrotCarAppService"
             android:exported="true">

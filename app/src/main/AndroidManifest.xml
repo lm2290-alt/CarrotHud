@@ -1,16 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.carrothud">
 
+    <!-- 인터넷 및 네트워크 스캔 권한 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
         android:allowBackup="true"
-        android:icon="@android:drawable/sym_def_app_icon"
-        android:label="CarrotHUD"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
-
-        <!-- 메인 앱 액티비티 -->
+        android:theme="@style/Theme.CarrotHUD"
+        android:usesCleartextTraffic="true"> <!-- HTTP 접속 허용 필수 -->
+        
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -20,26 +25,16 @@
             </intent-filter>
         </activity>
 
-        <!-- 안드로이드 오토 카 앱 서비스 등록 -->
         <service
             android:name=".CarrotCarAppService"
             android:exported="true">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
-                <category android:name="androidx.car.app.category.NAVIGATION" />
             </intent-filter>
         </service>
 
-        <!-- 안드로이드 오토 앱 설정 디스크립터 연결 (필수) -->
-        <meta-data
-            android:name="com.google.android.gms.car.application"
-            android:resource="@xml/automotive_app_desc" />
-
-        <!-- 안드로이드 오토 최소 API 레벨 -->
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"
             android:value="1" />
-
     </application>
-
 </manifest>

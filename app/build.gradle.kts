@@ -35,8 +35,4 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.squareup.okhttp3:okhttp:4.11.0")
-
-    // --- 안드로이드 오토 카 앱 라이브러리 추가 ---
-    implementation("androidx.car.app:app:1.3.0")
-    implementation("androidx.car.app:app-automotive:1.3.0")
 }

@@ -91,32 +91,9 @@ class CarrotMainScreen(carContext: CarContext) :
     }
 
     /*
-     * Surface 전체를 1280x720으로 변환.
-     * 렌더링과 터치가 동일한 COVER 좌표계를 사용한다.
+     * Android Auto Surface 클릭을
+     * 1280x720 WebView 좌표로 변환.
      */
-    private fun coverTransform(
-        sw: Int,
-        sh: Int
-    ): FloatArray {
-
-        val scale = maxOf(
-            sw / WEB_W.toFloat(),
-            sh / WEB_H.toFloat()
-        )
-
-        val dx =
-            (sw - WEB_W * scale) / 2f
-
-        val dy =
-            (sh - WEB_H * scale) / 2f
-
-        return floatArrayOf(
-            scale,
-            dx,
-            dy
-        )
-    }
-
     override fun onClick(
         x: Float,
         y: Float
@@ -129,14 +106,16 @@ class CarrotMainScreen(carContext: CarContext) :
 
         if (sw <= 0 || sh <= 0) return
 
-        val t = coverTransform(sw, sh)
+        val sx =
+            sw / WEB_W.toFloat()
 
-        val scale = t[0]
-        val dx = t[1]
-        val dy = t[2]
+        val sy =
+            sh / WEB_H.toFloat()
 
-        val wx = (x - dx) / scale
-        val wy = (y - dy) / scale
+        if (sx <= 0f || sy <= 0f) return
+
+        val wx = x / sx
+        val wy = y / sy
 
         if (
             wx < 0f ||
@@ -146,37 +125,37 @@ class CarrotMainScreen(carContext: CarContext) :
         ) return
 
         wv.post {
-            /*
-             * JS click이 아니라 WebView에 실제
-             * ACTION_DOWN -> ACTION_UP을 보낸다.
-             */
-            val now = SystemClock.uptimeMillis()
+            val now =
+                SystemClock.uptimeMillis()
 
-            val down = MotionEvent.obtain(
-                now,
-                now,
-                MotionEvent.ACTION_DOWN,
-                wx,
-                wy,
-                0
-            )
+            val down =
+                MotionEvent.obtain(
+                    now,
+                    now,
+                    MotionEvent.ACTION_DOWN,
+                    wx,
+                    wy,
+                    0
+                )
 
-            val up = MotionEvent.obtain(
-                now,
-                now + 60,
-                MotionEvent.ACTION_UP,
-                wx,
-                wy,
-                0
-            )
+            val up =
+                MotionEvent.obtain(
+                    now,
+                    now + 60,
+                    MotionEvent.ACTION_UP,
+                    wx,
+                    wy,
+                    0
+                )
 
             try {
                 wv.dispatchTouchEvent(down)
                 wv.dispatchTouchEvent(up)
 
                 log(
-                    "TOUCH surface=$x,$y web=$wx,$wy"
+                    "TOUCH $x,$y -> $wx,$wy"
                 )
+
             } finally {
                 down.recycle()
                 up.recycle()
@@ -187,66 +166,70 @@ class CarrotMainScreen(carContext: CarContext) :
     private fun initWebView() {
         if (webView != null) return
 
-        webView = WebView(carContext).apply {
+        webView =
+            WebView(carContext).apply {
 
-            setLayerType(
-                View.LAYER_TYPE_HARDWARE,
-                null
-            )
+                setLayerType(
+                    View.LAYER_TYPE_HARDWARE,
+                    null
+                )
 
-            isFocusable = true
-            isFocusableInTouchMode = true
+                isFocusable = true
+                isFocusableInTouchMode = true
 
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
 
-                mediaPlaybackRequiresUserGesture =
-                    false
+                    mediaPlaybackRequiresUserGesture =
+                        false
 
-                useWideViewPort = true
+                    useWideViewPort = true
 
-                /*
-                 * overview 자동 배율을 끈다.
-                 * UI가 커졌다 작아지는 원인 후보 제거.
-                 */
-                loadWithOverviewMode = false
+                    /*
+                     * WebView가 화면 크기에 따라
+                     * 자동으로 배율을 바꾸지 못하게 한다.
+                     */
+                    loadWithOverviewMode = false
 
-                textZoom = 100
+                    textZoom = 100
 
-                layoutAlgorithm =
-                    WebSettings.LayoutAlgorithm.NORMAL
+                    layoutAlgorithm =
+                        WebSettings.LayoutAlgorithm.NORMAL
 
-                setSupportZoom(false)
-                builtInZoomControls = false
-                displayZoomControls = false
+                    setSupportZoom(false)
+                    builtInZoomControls = false
+                    displayZoomControls = false
 
-                mixedContentMode =
-                    WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            }
-
-            webViewClient =
-                object : WebViewClient() {
-
-                    override fun onPageFinished(
-                        view: WebView?,
-                        url: String?
-                    ) {
-                        super.onPageFinished(
-                            view,
-                            url
-                        )
-
-                        fixDisplay(view)
-                        autoStartVision(view)
-                        installVideoMirror(view)
-                    }
+                    mixedContentMode =
+                        WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
-        }
+
+                webViewClient =
+                    object : WebViewClient() {
+
+                        override fun onPageFinished(
+                            view: WebView?,
+                            url: String?
+                        ) {
+                            super.onPageFinished(
+                                view,
+                                url
+                            )
+
+                            fixDisplay(view)
+                            autoStartVision(view)
+                            installVideoMirror(view)
+                        }
+                    }
+            }
 
         layoutWebView()
     }
 
+    /*
+     * WebView 자체 크기는 무조건 1280x720.
+     */
     private fun layoutWebView() {
         val wv = webView ?: return
 
@@ -270,14 +253,16 @@ class CarrotMainScreen(carContext: CarContext) :
     }
 
     /*
-     * 웹페이지 자체의 viewport도 1280x720에 묶는다.
+     * 웹페이지 viewport도 1280x720 고정.
      */
     private fun fixDisplay(
         view: WebView?
     ) {
         val js =
             "(function(){" +
+
             "var d=document.documentElement;" +
+
             "d.style.webkitTextSizeAdjust='100%';" +
             "d.style.width='1280px';" +
             "d.style.height='720px';" +
@@ -309,41 +294,7 @@ class CarrotMainScreen(carContext: CarContext) :
             "user-scalable=no';" +
 
             "window.scrollTo(0,0);" +
-            "})();"
 
-        view?.evaluateJavascript(
-            js,
-            null
-        )
-    }
-
-    private fun autoStartVision(
-        view: WebView?
-    ) {
-        val js =
-            "(function(){" +
-            "var n=0;" +
-
-            "var z=setInterval(function(){" +
-            "n++;" +
-
-            "var a=document.getElementsByTagName('*');" +
-
-            "for(var i=0;i<a.length;i++){" +
-            "var e=a[i];" +
-            "var t=(e.innerText||" +
-            "e.textContent||'').trim();" +
-
-            "if(" +
-            "t.indexOf('당근 비전 시작')!==-1||" +
-            "t.indexOf('비전 시작')!==-1" +
-            "){" +
-            "e.click();" +
-            "}" +
-            "}" +
-
-            "if(n>20)clearInterval(z);" +
-            "},500);" +
             "})();"
 
         view?.evaluateJavascript(
@@ -353,8 +304,58 @@ class CarrotMainScreen(carContext: CarContext) :
     }
 
     /*
-     * 성공했던 카메라 미러 방식 유지.
-     * WebRTC video -> Canvas2D
+     * 당근 비전 시작 버튼 자동 클릭.
+     */
+    private fun autoStartVision(
+        view: WebView?
+    ) {
+        val js =
+            "(function(){" +
+
+            "var n=0;" +
+
+            "var z=setInterval(function(){" +
+
+            "n++;" +
+
+            "var a=document.getElementsByTagName('*');" +
+
+            "for(var i=0;i<a.length;i++){" +
+
+            "var e=a[i];" +
+
+            "var t=(e.innerText||" +
+            "e.textContent||'').trim();" +
+
+            "if(" +
+            "t.indexOf('당근 비전 시작')!==-1||" +
+            "t.indexOf('비전 시작')!==-1" +
+            "){" +
+            "e.click();" +
+            "}" +
+
+            "}" +
+
+            "if(n>20)clearInterval(z);" +
+
+            "},500);" +
+
+            "})();"
+
+        view?.evaluateJavascript(
+            js,
+            null
+        )
+    }
+
+    /*
+     * 성공했던 카메라 처리 유지.
+     *
+     * WebRTC <video>
+     *       ↓
+     * Canvas2D
+     *       ↓
+     * Android Auto Surface
      */
     private fun installVideoMirror(
         view: WebView?
@@ -400,6 +401,10 @@ class CarrotMainScreen(carContext: CarContext) :
 
             "p.insertBefore(c,v);" +
 
+            /*
+             * 실제 video는 WebView.draw에서
+             * 안 잡히므로 숨기고 canvas를 사용.
+             */
             "v.style.visibility='hidden';" +
 
             "var ctx=c.getContext(" +
@@ -407,7 +412,10 @@ class CarrotMainScreen(carContext: CarContext) :
 
             "function draw(){" +
 
-            "if(v.videoWidth>0&&v.videoHeight>0){" +
+            "if(" +
+            "v.videoWidth>0&&" +
+            "v.videoHeight>0" +
+            "){" +
 
             "var cw=p.clientWidth||1280;" +
             "var ch=p.clientHeight||720;" +
@@ -419,7 +427,9 @@ class CarrotMainScreen(carContext: CarContext) :
             "var vh=v.videoHeight;" +
 
             "var s=Math.max(" +
-            "cw/vw,ch/vh);" +
+            "cw/vw," +
+            "ch/vh" +
+            ");" +
 
             "var dw=vw*s;" +
             "var dh=vh*s;" +
@@ -428,19 +438,32 @@ class CarrotMainScreen(carContext: CarContext) :
             "var dy=(ch-dh)/2;" +
 
             "try{" +
+
             "ctx.fillStyle='#000';" +
             "ctx.fillRect(0,0,cw,ch);" +
-            "ctx.drawImage(v,dx,dy,dw,dh);" +
+
+            "ctx.drawImage(" +
+            "v," +
+            "dx," +
+            "dy," +
+            "dw," +
+            "dh" +
+            ");" +
+
             "}catch(e){}" +
+
             "}" +
 
             "requestAnimationFrame(draw);" +
+
             "}" +
 
             "draw();" +
+
             "}" +
 
             "start();" +
+
             "})();"
 
         view?.evaluateJavascript(
@@ -479,7 +502,9 @@ class CarrotMainScreen(carContext: CarContext) :
                     return@launch
                 }
 
-                log("Comma=$ip")
+                log(
+                    "Comma=$ip"
+                )
 
                 drawMessage(
                     "영상 스트리밍 연결 중..."
@@ -499,6 +524,15 @@ class CarrotMainScreen(carContext: CarContext) :
             }
     }
 
+    /*
+     * 핵심:
+     *
+     * 1280x720 WebView 전체를
+     * Android Auto Surface 전체 크기로
+     * X/Y 각각 늘려서 그린다.
+     *
+     * 따라서 잘리는 영역 없음.
+     */
     private suspend fun startRenderLoop() {
 
         while (isRendering) {
@@ -522,16 +556,15 @@ class CarrotMainScreen(carContext: CarContext) :
                 if (
                     !surface.isValid ||
                     !isRendering
-                ) return@withContext
+                ) {
+                    return@withContext
+                }
 
-                /*
-                 * 페이지의 실제 layout은
-                 * 매 프레임 1280x720으로 유지.
-                 */
                 layoutWebView()
 
                 var canvas:
-                    android.graphics.Canvas? = null
+                    android.graphics.Canvas? =
+                    null
 
                 try {
                     canvas =
@@ -543,30 +576,24 @@ class CarrotMainScreen(carContext: CarContext) :
                             Color.BLACK
                         )
 
-                        /*
-                         * minOf가 아니라 maxOf.
-                         * 화면 비율을 유지하면서
-                         * Surface를 빈틈없이 채운다.
-                         */
-                        val t =
-                            coverTransform(
-                                canvas.width,
-                                canvas.height
-                            )
+                        val sx =
+                            canvas.width /
+                                WEB_W.toFloat()
+
+                        val sy =
+                            canvas.height /
+                                WEB_H.toFloat()
 
                         canvas.save()
 
-                        canvas.translate(
-                            t[1],
-                            t[2]
-                        )
-
                         canvas.scale(
-                            t[0],
-                            t[0]
+                            sx,
+                            sy
                         )
 
-                        wv.draw(canvas)
+                        wv.draw(
+                            canvas
+                        )
 
                         canvas.restore()
                     }
@@ -601,10 +628,12 @@ class CarrotMainScreen(carContext: CarContext) :
         synchronized(renderLock) {
 
             val c =
-                surfaceContainer ?: return
+                surfaceContainer
+                    ?: return
 
             val surface =
-                c.surface ?: return
+                c.surface
+                    ?: return
 
             if (
                 !surface.isValid ||
@@ -612,7 +641,8 @@ class CarrotMainScreen(carContext: CarContext) :
             ) return
 
             var canvas:
-                android.graphics.Canvas? = null
+                android.graphics.Canvas? =
+                null
 
             try {
                 canvas =
@@ -626,11 +656,17 @@ class CarrotMainScreen(carContext: CarContext) :
 
                     val paint =
                         Paint().apply {
-                            color = Color.WHITE
-                            textSize = 32f
+                            color =
+                                Color.WHITE
+
+                            textSize =
+                                32f
+
                             textAlign =
                                 Paint.Align.CENTER
-                            isAntiAlias = true
+
+                            isAntiAlias =
+                                true
                         }
 
                     canvas.drawText(
@@ -666,6 +702,7 @@ class CarrotMainScreen(carContext: CarContext) :
         msg: String
     ) {
         runCatching {
+
             File(
                 carContext.filesDir,
                 "carrot_crash.txt"
@@ -714,13 +751,17 @@ class CarrotMainScreen(carContext: CarContext) :
                                     7000,
                                     250
                                 )
-                            ) ip
-                            else null
+                            ) {
+                                ip
+                            } else {
+                                null
+                            }
                         }
                     }
 
                 val found =
-                    tasks.awaitAll()
+                    tasks
+                        .awaitAll()
                         .firstOrNull {
                             it != null
                         }
@@ -746,14 +787,18 @@ class CarrotMainScreen(carContext: CarContext) :
                         .getNetworkInterfaces()
                 )
 
-            for (network in interfaces) {
+            for (
+                network in interfaces
+            ) {
 
                 val addresses =
                     Collections.list(
                         network.inetAddresses
                     )
 
-                for (address in addresses) {
+                for (
+                    address in addresses
+                ) {
 
                     if (
                         !address.isLoopbackAddress &&
@@ -780,6 +825,7 @@ class CarrotMainScreen(carContext: CarContext) :
             }
 
         } catch (e: Exception) {
+
             log(
                 "Subnet: " +
                 e.localizedMessage
@@ -814,23 +860,41 @@ class CarrotMainScreen(carContext: CarContext) :
         }
     }
 
+    /*
+     * PAN 액션을 Map Action Strip에 넣어
+     * Android Auto의 Surface interaction을 활성화.
+     */
     override fun onGetTemplate():
         Template {
 
+        val mapActions =
+            ActionStrip.Builder()
+                .addAction(
+                    Action.PAN
+                )
+                .build()
+
+        val normalActions =
+            ActionStrip.Builder()
+                .addAction(
+                    Action.Builder()
+                        .setTitle(
+                            "재시도"
+                        )
+                        .setOnClickListener {
+                            startStreamingPipeline()
+                        }
+                        .build()
+                )
+                .build()
+
         return NavigationTemplate
             .Builder()
+            .setMapActionStrip(
+                mapActions
+            )
             .setActionStrip(
-                ActionStrip
-                    .Builder()
-                    .addAction(
-                        Action.Builder()
-                            .setTitle("재시도")
-                            .setOnClickListener {
-                                startStreamingPipeline()
-                            }
-                            .build()
-                    )
-                    .build()
+                normalActions
             )
             .build()
     }

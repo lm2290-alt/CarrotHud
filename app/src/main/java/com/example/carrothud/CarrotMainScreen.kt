@@ -123,7 +123,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
         webView = WebView(carContext).apply {
 
-            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
             settings.apply {
                 javaScriptEnabled = true

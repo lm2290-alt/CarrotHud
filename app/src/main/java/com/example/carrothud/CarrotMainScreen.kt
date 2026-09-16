@@ -1,11 +1,10 @@
 package com.example.carrothud
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.view.View
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
@@ -15,10 +14,13 @@ import androidx.car.app.navigation.NavigationManager
 import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
-import java.io.File
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
+import java.net.URL
 import java.util.Collections
 
 class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCallback {
@@ -26,12 +28,9 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private var surfaceContainer: SurfaceContainer? = null
     @Volatile private var isRendering = false
     private var streamJob: Job? = null
-    private var webView: WebView? = null
     private val renderLock = Any()
-    private var lastErrorMessage: String? = null
-
-    private var lastWidth = -1
-    private var lastHeight = -1
+    private var lastMessage: String = "콤마4 탐색 중..."
+    @Volatile private var currentBitmap: Bitmap? = null
 
     init {
         runCatching {
@@ -42,9 +41,6 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
             carContext.getCarService(androidx.car.app.AppManager::class.java)
                 .setSurfaceCallback(this)
-        }.onFailure { e ->
-            lastErrorMessage = "Init Error: ${e.localizedMessage}"
-            saveCustomLog(lastErrorMessage!!)
         }
     }
 
@@ -53,17 +49,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             this.surfaceContainer = surfaceContainer
             isRendering = true
         }
-        
-        CoroutineScope(Dispatchers.Main).launch {
-            try {
-                initWebView()
-                startStreamingPipeline()
-            } catch (e: Exception) {
-                lastErrorMessage = "Surface Error: ${e.localizedMessage}"
-                saveCustomLog(lastErrorMessage!!)
-                invalidate()
-            }
-        }
+        startStreamingPipeline()
     }
 
     override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
@@ -71,152 +57,159 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             isRendering = false
             streamJob?.cancel()
             this.surfaceContainer = null
-        }
-    }
-
-    private fun initWebView() {
-        if (webView == null) {
-            // [핵심] CarContext 대신 applicationContext 사용하여 WebView 크래시 방지
-            webView = WebView(carContext.applicationContext).apply {
-                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    mediaPlaybackRequiresUserGesture = false
-                    useWideViewPort = true
-                    loadWithOverviewMode = true
-                    textZoom = 100
-                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                }
-                webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        val autoStartScript = """
-                            (function() {
-                                var attempts = 0;
-                                var autoClicker = setInterval(function() {
-                                    attempts++;
-                                    var allElements = document.getElementsByTagName('*');
-                                    for (var i = 0; i < allElements.length; i++) {
-                                        var el = allElements[i];
-                                        var txt = (el.innerText || el.textContent || '').trim();
-                                        if (txt.indexOf('당근 비전 시작') !== -1 || txt.indexOf('비전 시작') !== -1 || txt.indexOf('시작') !== -1) {
-                                            el.click();
-                                            if (el.parentElement) el.parentElement.click();
-                                        }
-                                    }
-                                    if (attempts > 20) {
-                                        clearInterval(autoClicker);
-                                    }
-                                }, 500);
-                            })();
-                        """.trimIndent()
-                        view?.evaluateJavascript(autoStartScript, null)
-                    }
-                }
-            }
+            currentBitmap?.recycle()
+            currentBitmap = null
         }
     }
 
     private fun startStreamingPipeline() {
         streamJob?.cancel()
         streamJob = CoroutineScope(Dispatchers.IO).launch {
-            drawMessage("콤마4 탐색 중...")
+            updateMessage("콤마4 탐색 중...")
             val commaIp = findCommaDeviceIp()
 
             if (commaIp == null) {
-                drawMessage("콤마4(포트 7000)를 찾지 못함")
-                delay(2000)
+                updateMessage("콤마4(포트 7000) 탐색 실패\n재시도 중...")
+                delay(3000)
                 if (isRendering) startStreamingPipeline()
                 return@launch
             }
 
-            drawMessage("영상 스트리밍 연결 중...")
-            val visionUrl = "http://$commaIp:7000"
-
-            withContext(Dispatchers.Main) {
-                webView?.loadUrl(visionUrl)
-            }
-
-            startSurfaceRenderLoop()
+            updateMessage("스트리밍 연결 중: $commaIp")
+            runMjpegStream(commaIp)
         }
     }
 
-    private suspend fun startSurfaceRenderLoop() {
-        while (isRendering) {
-            withContext(Dispatchers.Main) {
-                val container = surfaceContainer ?: return@withContext
-                val surface = container.surface ?: return@withContext
-                val wv = webView ?: return@withContext
-                if (!surface.isValid || !isRendering) return@withContext
-
-                val width = if (container.width > 0) container.width else 1280
-                val height = if (container.height > 0) container.height else 720
-
-                if (width != lastWidth || height != lastHeight) {
-                    lastWidth = width
-                    lastHeight = height
-                    wv.measure(
-                        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
-                    )
-                    wv.layout(0, 0, width, height)
-                }
-
-                var canvas: android.graphics.Canvas? = null
-                try {
-                    canvas = surface.lockCanvas(null)
-                    if (canvas != null) {
-                        wv.draw(canvas)
-                    }
-                } catch (t: Throwable) {
-                    saveCustomLog("Render Loop Crash: ${t.localizedMessage}")
-                } finally {
-                    if (canvas != null) {
-                        runCatching { surface.unlockCanvasAndPost(canvas) }
-                    }
-                }
+    private suspend fun runMjpegStream(ip: String) {
+        var connection: HttpURLConnection? = null
+        var inputStream: InputStream? = null
+        try {
+            val url = URL("http://$ip:7000")
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 3000
+                readTimeout = 5000
+                connect()
             }
-            delay(33)
+            inputStream = connection.inputStream
+            updateMessage("스트리밍 연결 성공")
+
+            val buffer = ByteArray(16384)
+            val bos = ByteArrayOutputStream()
+
+            while (isRendering) {
+                val available = inputStream.available()
+                val chunk = if (available > 0) {
+                    val b = ByteArray(minOf(available, buffer.size))
+                    inputStream.read(b)
+                } else {
+                    inputStream.read(buffer)
+                }
+
+                if (chunk == -1) break
+                bos.write(buffer, 0, chunk)
+
+                val bytes = bos.toByteArray()
+                var startIndex = -1
+                var endIndex = -1
+
+                for (i in 0 until bytes.size - 1) {
+                    if ((bytes[i].toInt() and 0xFF) == 0xFF && (bytes[i + 1].toInt() and 0xFF) == 0xD8) {
+                        startIndex = i
+                        break
+                    }
+                }
+
+                if (startIndex != -1) {
+                    for (i in startIndex + 2 until bytes.size - 1) {
+                        if ((bytes[i].toInt() and 0xFF) == 0xFF && (bytes[i + 1].toInt() and 0xFF) == 0xD9) {
+                            endIndex = i + 2
+                            break
+                        }
+                    }
+                }
+
+                if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
+                    try {
+                        val bitmap = BitmapFactory.decodeByteArray(bytes, startIndex, endIndex - startIndex)
+                        if (bitmap != null) {
+                            synchronized(renderLock) {
+                                currentBitmap?.recycle()
+                                currentBitmap = bitmap
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // 디코딩 에러 무시
+                    }
+
+                    bos.reset()
+                    if (endIndex < bytes.size) {
+                        bos.write(bytes, endIndex, bytes.size - endIndex)
+                    }
+                } else if (bytes.size > 1024 * 1024) {
+                    bos.reset()
+                }
+
+                renderFrame()
+                delay(10)
+            }
+        } catch (e: Exception) {
+            updateMessage("스트리밍 끊김: ${e.localizedMessage}\n재연결 중...")
+            delay(2000)
+            if (isRendering) {
+                runMjpegStream(ip)
+            }
+        } finally {
+            try { inputStream?.close() } catch (e: Exception) {}
+            try { connection?.disconnect() } catch (e: Exception) {}
         }
     }
 
-    private fun drawMessage(message: String) {
+    private fun updateMessage(msg: String) {
+        lastMessage = msg
+        renderFrame()
+    }
+
+    private fun renderFrame() {
         synchronized(renderLock) {
             val container = surfaceContainer ?: return
             val surface = container.surface ?: return
             if (!surface.isValid || !isRendering) return
 
-            var canvas: android.graphics.Canvas? = null
+            var canvas: Canvas? = null
             try {
                 canvas = surface.lockCanvas(null)
                 if (canvas != null) {
-                    val targetWidth = if (container.width > 0) container.width else canvas.width
-                    val targetHeight = if (container.height > 0) container.height else canvas.height
+                    val width = if (container.width > 0) container.width else canvas.width
+                    val height = if (container.height > 0) container.height else canvas.height
 
                     canvas.drawColor(Color.BLACK)
-                    val paint = Paint().apply {
-                        color = Color.WHITE
-                        textSize = 32f
-                        textAlign = Paint.Align.CENTER
-                        isAntiAlias = true
+
+                    val bmp = currentBitmap
+                    if (bmp != null && !bmp.isRecycled) {
+                        val srcRect = android.graphics.Rect(0, 0, bmp.width, bmp.height)
+                        val destRect = android.graphics.Rect(0, 0, width, height)
+                        canvas.drawBitmap(bmp, srcRect, destRect, null)
+                    } else {
+                        val paint = Paint().apply {
+                            color = Color.WHITE
+                            textSize = 32f
+                            textAlign = Paint.Align.CENTER
+                            isAntiAlias = true
+                        }
+                        val lines = lastMessage.split("\n")
+                        val startY = height / 2f - (lines.size * 20f)
+                        lines.forEachIndexed { index, line ->
+                            canvas.drawText(line, width / 2f, startY + (index * 40f), paint)
+                        }
                     }
-                    canvas.drawText(message, targetWidth / 2f, targetHeight / 2f, paint)
                 }
             } catch (t: Throwable) {
-                saveCustomLog("Message Canvas Crash: ${t.localizedMessage}")
+                // 렌더링 예외 무시
             } finally {
                 if (canvas != null) {
                     runCatching { surface.unlockCanvasAndPost(canvas) }
                 }
             }
-        }
-    }
-
-    private fun saveCustomLog(msg: String) {
-        runCatching {
-            val file = File(carContext.filesDir, "carrot_crash.txt")
-            file.appendText("${java.util.Date()}: $msg\n")
         }
     }
 
@@ -231,7 +224,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             val tasks = (2..254).map { i ->
                 async(Dispatchers.IO) {
                     val testIp = "$subnet.$i"
-                    if (isPortOpen(testIp, 7000, 250)) testIp else null
+                    if (isPortOpen(testIp, 7000, 200)) testIp else null
                 }
             }
             val foundIp = tasks.awaitAll().firstOrNull { it != null }
@@ -256,9 +249,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     }
                 }
             }
-        } catch (e: Exception) {
-            // 무시
-        }
+        } catch (e: Exception) {}
         return subnets
     }
 
@@ -274,37 +265,19 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     }
 
     override fun onGetTemplate(): Template {
-        // 오류 발생 시 회색 오류 창 대신 차량 화면에 에러 내용을 직접 출력
-        if (lastErrorMessage != null) {
-            return PaneTemplate.Builder(
-                Pane.Builder()
-                    .addRow(Row.Builder().setTitle("오류 로그").addText(lastErrorMessage!!).build())
+        return NavigationTemplate.Builder()
+            .setActionStrip(
+                ActionStrip.Builder()
+                    .addAction(
+                        Action.Builder()
+                            .setTitle("재시도")
+                            .setOnClickListener {
+                                startStreamingPipeline()
+                            }
+                            .build()
+                    )
                     .build()
-            ).setTitle("당근HUD 실행 오류").build()
-        }
-
-        return try {
-            NavigationTemplate.Builder()
-                .setActionStrip(
-                    ActionStrip.Builder()
-                        .addAction(
-                            Action.Builder()
-                                .setTitle("재시도")
-                                .setOnClickListener {
-                                    lastErrorMessage = null
-                                    startStreamingPipeline()
-                                }
-                                .build()
-                        )
-                        .build()
-                )
-                .build()
-        } catch (e: Exception) {
-            PaneTemplate.Builder(
-                Pane.Builder()
-                    .addRow(Row.Builder().setTitle("템플릿 생성 실패").addText(e.localizedMessage ?: "알 수 없는 에러").build())
-                    .build()
-            ).setTitle("당근HUD 실행 오류").build()
-        }
+            )
+            .build()
     }
 }

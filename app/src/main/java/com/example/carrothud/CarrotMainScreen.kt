@@ -13,16 +13,19 @@ import androidx.car.app.model.*
 import androidx.car.app.navigation.NavigationManager
 import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
-import androidx.car.app.navigation.model.RoutingInfo
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.net.URL
+import java.text.SimpleDateFormat
 import java.util.Collections
+import java.util.Date
+import java.util.Locale
 
 class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCallback {
 
@@ -42,6 +45,17 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
             carContext.getCarService(androidx.car.app.AppManager::class.java)
                 .setSurfaceCallback(this)
+        }
+    }
+
+    private fun saveLogToFile(tag: String, throwable: Throwable) {
+        try {
+            val logFile = File(carContext.filesDir, "carrothud_error.log")
+            val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+            val logContent = "[$time] [$tag] ${throwable.javaClass.name}: ${throwable.localizedMessage}\n${throwable.stackTraceToString()}\n-----------------------------------\n"
+            logFile.appendText(logContent)
+        } catch (e: Exception) {
+            // 파일 쓰기 예외 무시
         }
     }
 
@@ -70,7 +84,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             val commaIp = findCommaDeviceIp()
 
             if (commaIp == null) {
-                updateMessage("콤마4(포트 7000) 탐색 실패\n재시도 중...")
+                updateMessage("콤마4(포트 7000) 탐색 실패\n서브넷 확인 필요\n재시도 중...")
                 delay(3000)
                 if (isRendering) startStreamingPipeline()
                 return@launch
@@ -132,7 +146,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                             }
                         }
                     } catch (e: Exception) {
-                        // 디코딩 에러 무시
+                        saveLogToFile("BitmapDecodeError", e)
                     }
 
                     bos.reset()
@@ -146,8 +160,10 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 renderFrame()
             }
         } catch (e: Exception) {
-            updateMessage("스트리밍 끊김: ${e.localizedMessage}\n재연결 중...")
-            delay(2000)
+            saveLogToFile("StreamError", e)
+            android.util.Log.e("CarrotHUD", "Stream error", e)
+            updateMessage("오류 발생:\n${e.javaClass.simpleName}: ${e.localizedMessage}")
+            delay(3000)
             if (isRendering) {
                 runMjpegStream(ip)
             }
@@ -185,19 +201,20 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     } else {
                         val paint = Paint().apply {
                             color = Color.WHITE
-                            textSize = 32f
+                            textSize = 28f
                             textAlign = Paint.Align.CENTER
                             isAntiAlias = true
                         }
                         val lines = lastMessage.split("\n")
-                        val startY = height / 2f - (lines.size * 20f)
+                        val startY = height / 2f - (lines.size * 18f)
                         lines.forEachIndexed { index, line ->
-                            canvas.drawText(line, width / 2f, startY + (index * 40f), paint)
+                            canvas.drawText(line, width / 2f, startY + (index * 35f), paint)
                         }
                     }
                 }
             } catch (t: Throwable) {
-                // 렌더링 예외 무시
+                saveLogToFile("RenderError", t)
+                android.util.Log.e("CarrotHUD", "Render error", t)
             } finally {
                 if (canvas != null) {
                     runCatching { surface.unlockCanvasAndPost(canvas) }
@@ -220,7 +237,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     if (isPortOpen(testIp, 7000, 200)) testIp else null
                 }
             }
-            val foundIp = tasks.awaitAll().firstOrNull { it != null }
+            val foundIp = tasks.awaitAll().firstOrNull { t -> t != null }
             if (foundIp != null) return@coroutineScope foundIp
         }
         null
@@ -259,11 +276,6 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
     override fun onGetTemplate(): Template {
         return NavigationTemplate.Builder()
-            .setNavigationInfo(
-                RoutingInfo.Builder()
-                    .setLoading(false)
-                    .build()
-            )
             .setActionStrip(
                 ActionStrip.Builder()
                     .addAction(

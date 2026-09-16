@@ -1,6 +1,5 @@
 package com.example.carrothud
 
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.view.View
@@ -22,10 +21,10 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
+import java.util.Collections
 
-class CarrotMainScreen(
-    carContext: CarContext
-) : Screen(carContext), SurfaceCallback {
+class CarrotMainScreen(carContext: CarContext) :
+    Screen(carContext), SurfaceCallback {
 
     private var surfaceContainer: SurfaceContainer? = null
 
@@ -42,14 +41,12 @@ class CarrotMainScreen(
 
     init {
         runCatching {
-
             val navigationManager =
                 carContext.getCarService(NavigationManager::class.java)
 
             navigationManager.setNavigationManagerCallback(
                 object : NavigationManagerCallback {
-                    override fun onStopNavigation() {
-                    }
+                    override fun onStopNavigation() {}
                 }
             )
 
@@ -58,7 +55,6 @@ class CarrotMainScreen(
                 .setSurfaceCallback(this)
 
         }.onFailure { e ->
-
             saveCustomLog(
                 "Init Exception: ${e.localizedMessage}"
             )
@@ -68,17 +64,13 @@ class CarrotMainScreen(
     override fun onSurfaceAvailable(
         surfaceContainer: SurfaceContainer
     ) {
-
         synchronized(renderLock) {
-
             this.surfaceContainer = surfaceContainer
             isRendering = true
         }
 
         CoroutineScope(Dispatchers.Main).launch {
-
             initWebView()
-
             startStreamingPipeline()
         }
     }
@@ -86,13 +78,9 @@ class CarrotMainScreen(
     override fun onSurfaceDestroyed(
         surfaceContainer: SurfaceContainer
     ) {
-
         synchronized(renderLock) {
-
             isRendering = false
-
             streamJob?.cancel()
-
             this.surfaceContainer = null
         }
     }
@@ -101,8 +89,7 @@ class CarrotMainScreen(
      * Android Auto 화면 터치
      *
      * SurfaceCallback으로 들어온 좌표를
-     * WebView의 실제 웹페이지 좌표로 변환한 다음
-     * 해당 HTML 요소를 클릭한다.
+     * WebView 내부 DOM 좌표로 변환해서 클릭한다.
      */
     override fun onClick(x: Float, y: Float) {
 
@@ -152,7 +139,8 @@ class CarrotMainScreen(
 
                         var target =
                             el.closest(
-                                'button, a, input, select, textarea, [role="button"], [onclick], .btn, .button'
+                                'button, a, input, select, textarea, ' +
+                                '[role="button"], [onclick], .btn, .button'
                             ) || el;
 
                         try {
@@ -164,6 +152,7 @@ class CarrotMainScreen(
                                         'pointerdown',
                                         {
                                             bubbles: true,
+                                            cancelable: true,
                                             clientX: cssX,
                                             clientY: cssY,
                                             pointerType: 'touch'
@@ -176,6 +165,7 @@ class CarrotMainScreen(
                                         'pointerup',
                                         {
                                             bubbles: true,
+                                            cancelable: true,
                                             clientX: cssX,
                                             clientY: cssY,
                                             pointerType: 'touch'
@@ -184,12 +174,10 @@ class CarrotMainScreen(
                                 );
                             }
 
-                        } catch(ignore) {
-                        }
+                        } catch (ignore) {}
 
                         if (
-                            typeof target.click ===
-                            'function'
+                            typeof target.click === 'function'
                         ) {
 
                             target.click();
@@ -221,7 +209,7 @@ class CarrotMainScreen(
                             .slice(0, 50)
                         );
 
-                    } catch(e) {
+                    } catch (e) {
 
                         return "JS_ERROR:" + e;
                     }
@@ -246,8 +234,8 @@ class CarrotMainScreen(
         webView = WebView(carContext).apply {
 
             /*
-             * Surface Canvas에 직접 그리기 때문에
-             * software layer 사용
+             * Surface에 직접 그릴 것이므로
+             * SOFTWARE 렌더링 사용
              */
             setLayerType(
                 View.LAYER_TYPE_SOFTWARE,
@@ -257,22 +245,19 @@ class CarrotMainScreen(
             settings.apply {
 
                 javaScriptEnabled = true
-
                 domStorageEnabled = true
 
                 mediaPlaybackRequiresUserGesture = false
 
                 /*
-                 * 휴대폰 WebView와 최대한 같은
-                 * viewport 동작 사용
+                 * 폰 화면과 최대한 같은 viewport 사용
                  */
                 useWideViewPort = true
-
                 loadWithOverviewMode = true
 
                 /*
-                 * Android Auto 쪽에서
-                 * 글씨를 임의로 확대하지 않도록 고정
+                 * Android Auto에서
+                 * 글자 크기가 임의로 변하는 현상 억제
                  */
                 textZoom = 100
 
@@ -282,15 +267,10 @@ class CarrotMainScreen(
                 /*
                  * WebView 자체 확대/축소 방지
                  */
+                builtInZoomControls = false
+                displayZoomControls = false
                 setSupportZoom(false)
 
-                builtInZoomControls = false
-
-                displayZoomControls = false
-
-                /*
-                 * comma 페이지가 HTTP이므로 허용
-                 */
                 mixedContentMode =
                     WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             }
@@ -309,33 +289,31 @@ class CarrotMainScreen(
                         )
 
                         /*
-                         * 핵심:
-                         *
-                         * Android Auto에서 WebView가
-                         * 작은 글씨를 자동 확대하는 것을 막는다.
-                         *
-                         * 화면 자체를 1280x720 같은
-                         * 별도 HUD 레이아웃으로 만드는 게 아니라
-                         * 실제 Surface 크기를 그대로 사용한다.
+                         * Android WebView가
+                         * 화면 크기에 따라 글자를 자동 확대하는 것 방지
                          */
-                        val displayFixScript = """
+                        val viewportScript = """
                             (function() {
 
                                 try {
 
-                                    document.documentElement.style.setProperty(
-                                        '-webkit-text-size-adjust',
-                                        '100%',
-                                        'important'
-                                    );
-
-                                    if (document.body) {
-
-                                        document.body.style.setProperty(
+                                    document.documentElement
+                                        .style
+                                        .setProperty(
                                             '-webkit-text-size-adjust',
                                             '100%',
                                             'important'
                                         );
+
+                                    if (document.body) {
+
+                                        document.body
+                                            .style
+                                            .setProperty(
+                                                '-webkit-text-size-adjust',
+                                                '100%',
+                                                'important'
+                                            );
                                     }
 
                                     var viewport =
@@ -356,9 +334,10 @@ class CarrotMainScreen(
                                         viewport.name =
                                             'viewport';
 
-                                        document.head.appendChild(
-                                            viewport
-                                        );
+                                        document.head
+                                            .appendChild(
+                                                viewport
+                                            );
                                     }
 
                                     if (viewport) {
@@ -369,46 +348,43 @@ class CarrotMainScreen(
                                             ) || '';
 
                                         if (
-                                            !/initial-scale\s*=/.test(
-                                                content
-                                            )
+                                            !/initial-scale\s*=/
+                                                .test(content)
                                         ) {
 
                                             content +=
                                                 (
                                                     content
-                                                    ? ','
-                                                    : ''
+                                                        ? ','
+                                                        : ''
                                                 ) +
                                                 'initial-scale=1';
                                         }
 
                                         if (
-                                            !/maximum-scale\s*=/.test(
-                                                content
-                                            )
+                                            !/maximum-scale\s*=/
+                                                .test(content)
                                         ) {
 
                                             content +=
                                                 (
                                                     content
-                                                    ? ','
-                                                    : ''
+                                                        ? ','
+                                                        : ''
                                                 ) +
                                                 'maximum-scale=1';
                                         }
 
                                         if (
-                                            !/user-scalable\s*=/.test(
-                                                content
-                                            )
+                                            !/user-scalable\s*=/
+                                                .test(content)
                                         ) {
 
                                             content +=
                                                 (
                                                     content
-                                                    ? ','
-                                                    : ''
+                                                        ? ','
+                                                        : ''
                                                 ) +
                                                 'user-scalable=no';
                                         }
@@ -419,19 +395,18 @@ class CarrotMainScreen(
                                         );
                                     }
 
-                                } catch(e) {
-                                }
+                                } catch (e) {}
 
                             })();
                         """.trimIndent()
 
                         view?.evaluateJavascript(
-                            displayFixScript,
+                            viewportScript,
                             null
                         )
 
                         /*
-                         * 기존 당근비전 자동 시작 기능
+                         * 당근 비전 시작 버튼 자동 클릭
                          */
                         val autoStartScript = """
                             (function() {
@@ -445,9 +420,10 @@ class CarrotMainScreen(
                                             attempts++;
 
                                             var allElements =
-                                                document.getElementsByTagName(
-                                                    '*'
-                                                );
+                                                document
+                                                    .getElementsByTagName(
+                                                        '*'
+                                                    );
 
                                             for (
                                                 var i = 0;
@@ -480,7 +456,9 @@ class CarrotMainScreen(
                                                         el.parentElement
                                                     ) {
 
-                                                        el.parentElement.click();
+                                                        el
+                                                            .parentElement
+                                                            .click();
                                                     }
                                                 }
                                             }
@@ -510,6 +488,14 @@ class CarrotMainScreen(
         }
     }
 
+    /*
+     * ============================
+     * 콤마4 연결
+     * ============================
+     *
+     * 여기부터 탐색 방식은
+     * 9d65662 원본 방식 유지
+     */
     private fun startStreamingPipeline() {
 
         streamJob?.cancel()
@@ -548,6 +534,10 @@ class CarrotMainScreen(
                 val visionUrl =
                     "http://$commaIp:7000"
 
+                saveCustomLog(
+                    "Comma found: $visionUrl"
+                )
+
                 withContext(
                     Dispatchers.Main
                 ) {
@@ -562,10 +552,7 @@ class CarrotMainScreen(
     }
 
     /*
-     * WebView를 Android Auto Surface에
-     * 그대로 그린다.
-     *
-     * 여기서 별도의 고정 해상도를 만들지 않는다.
+     * WebView → Android Auto Surface
      */
     private suspend fun startSurfaceRenderLoop() {
 
@@ -591,25 +578,26 @@ class CarrotMainScreen(
                     !surface.isValid ||
                     !isRendering
                 ) {
-
                     return@withContext
                 }
 
                 val width =
-                    if (container.width > 0)
+                    if (container.width > 0) {
                         container.width
-                    else
+                    } else {
                         1280
+                    }
 
                 val height =
-                    if (container.height > 0)
+                    if (container.height > 0) {
                         container.height
-                    else
+                    } else {
                         720
+                    }
 
                 /*
                  * Surface 크기가 바뀔 때만
-                 * WebView 재배치
+                 * WebView layout 다시 계산
                  */
                 if (
                     width != lastWidth ||
@@ -620,16 +608,16 @@ class CarrotMainScreen(
                     lastHeight = height
 
                     wv.measure(
-
-                        View.MeasureSpec.makeMeasureSpec(
-                            width,
-                            View.MeasureSpec.EXACTLY
-                        ),
-
-                        View.MeasureSpec.makeMeasureSpec(
-                            height,
-                            View.MeasureSpec.EXACTLY
-                        )
+                        View.MeasureSpec
+                            .makeMeasureSpec(
+                                width,
+                                View.MeasureSpec.EXACTLY
+                            ),
+                        View.MeasureSpec
+                            .makeMeasureSpec(
+                                height,
+                                View.MeasureSpec.EXACTLY
+                            )
                     )
 
                     wv.layout(
@@ -640,7 +628,9 @@ class CarrotMainScreen(
                     )
                 }
 
-                var canvas: Canvas? = null
+                var canvas:
+                    android.graphics.Canvas? =
+                    null
 
                 try {
 
@@ -649,25 +639,18 @@ class CarrotMainScreen(
                             null
                         )
 
-                    canvas?.let {
-
-                        /*
-                         * 검은 배경으로 한번 정리 후
-                         * WebView를 그대로 그림
-                         */
-                        it.drawColor(
-                            Color.BLACK
-                        )
+                    if (canvas != null) {
 
                         wv.draw(
-                            it
+                            canvas
                         )
                     }
 
                 } catch (t: Throwable) {
 
                     saveCustomLog(
-                        "Render Loop Crash: ${t.localizedMessage}"
+                        "Render Loop Crash: " +
+                            t.localizedMessage
                     )
 
                 } finally {
@@ -676,42 +659,48 @@ class CarrotMainScreen(
 
                         runCatching {
 
-                            surface.unlockCanvasAndPost(
-                                canvas
-                            )
+                            surface
+                                .unlockCanvasAndPost(
+                                    canvas
+                                )
                         }
                     }
                 }
             }
 
             /*
-             * 약 30fps
+             * 약 30 FPS
              */
             delay(33)
         }
     }
 
-    private suspend fun drawMessage(
+    private fun drawMessage(
         message: String
     ) {
 
-        withContext(
-            Dispatchers.Main
+        synchronized(
+            renderLock
         ) {
 
             val container =
                 surfaceContainer
-                    ?: return@withContext
+                    ?: return
 
             val surface =
                 container.surface
-                    ?: return@withContext
+                    ?: return
 
-            if (!surface.isValid) {
-                return@withContext
+            if (
+                !surface.isValid ||
+                !isRendering
+            ) {
+                return
             }
 
-            var canvas: Canvas? = null
+            var canvas:
+                android.graphics.Canvas? =
+                null
 
             try {
 
@@ -720,36 +709,59 @@ class CarrotMainScreen(
                         null
                     )
 
-                canvas?.let {
+                if (canvas != null) {
 
-                    it.drawColor(
+                    val targetWidth =
+                        if (
+                            container.width > 0
+                        ) {
+                            container.width
+                        } else {
+                            canvas.width
+                        }
+
+                    val targetHeight =
+                        if (
+                            container.height > 0
+                        ) {
+                            container.height
+                        } else {
+                            canvas.height
+                        }
+
+                    canvas.drawColor(
                         Color.BLACK
                     )
 
                     val paint =
-                        Paint(
-                            Paint.ANTI_ALIAS_FLAG
-                        ).apply {
+                        Paint().apply {
 
                             color =
                                 Color.WHITE
 
                             textSize =
-                                42f
+                                32f
+
+                            textAlign =
+                                Paint.Align.CENTER
+
+                            isAntiAlias =
+                                true
                         }
 
-                    it.drawText(
+                    canvas.drawText(
                         message,
-                        50f,
-                        100f,
+                        targetWidth / 2f,
+                        targetHeight / 2f,
                         paint
                     )
                 }
 
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
 
                 saveCustomLog(
-                    "drawMessage: ${e.localizedMessage}"
+                    "Message Canvas Crash: " +
+                        t.localizedMessage
                 )
 
             } finally {
@@ -758,185 +770,18 @@ class CarrotMainScreen(
 
                     runCatching {
 
-                        surface.unlockCanvasAndPost(
-                            canvas
-                        )
+                        surface
+                            .unlockCanvasAndPost(
+                                canvas
+                            )
                     }
                 }
-            }
-        }
-    }
-
-    /*
-     * comma 장치 탐색
-     */
-    private fun findCommaDeviceIp(): String? {
-
-        /*
-         * 흔히 사용되는 주소를 먼저 확인
-         */
-        val preferredIps =
-            listOf(
-                "192.168.43.1",
-                "192.168.0.1",
-                "192.168.1.1"
-            )
-
-        for (ip in preferredIps) {
-
-            if (
-                isPortOpen(
-                    ip,
-                    7000,
-                    150
-                )
-            ) {
-
-                return ip
-            }
-        }
-
-        /*
-         * 현재 연결된 네트워크의 /24 탐색
-         */
-        val subnets =
-            getLocalSubnets()
-
-        for (subnet in subnets) {
-
-            for (i in 1..254) {
-
-                if (!isRendering) {
-                    return null
-                }
-
-                val ip =
-                    "$subnet.$i"
-
-                if (
-                    isPortOpen(
-                        ip,
-                        7000,
-                        60
-                    )
-                ) {
-
-                    return ip
-                }
-            }
-        }
-
-        return null
-    }
-
-    private fun getLocalSubnets(): List<String> {
-
-        val result =
-            mutableSetOf<String>()
-
-        try {
-
-            val interfaces =
-                NetworkInterface
-                    .getNetworkInterfaces()
-
-            while (
-                interfaces.hasMoreElements()
-            ) {
-
-                val networkInterface =
-                    interfaces.nextElement()
-
-                if (
-                    !networkInterface.isUp ||
-                    networkInterface.isLoopback
-                ) {
-
-                    continue
-                }
-
-                val addresses =
-                    networkInterface
-                        .inetAddresses
-
-                while (
-                    addresses.hasMoreElements()
-                ) {
-
-                    val address =
-                        addresses.nextElement()
-
-                    val host =
-                        address.hostAddress
-                            ?: continue
-
-                    if (
-                        host.contains(":")
-                    ) {
-
-                        continue
-                    }
-
-                    val parts =
-                        host.split(".")
-
-                    if (
-                        parts.size == 4
-                    ) {
-
-                        result.add(
-                            "${parts[0]}.${parts[1]}.${parts[2]}"
-                        )
-                    }
-                }
-            }
-
-        } catch (e: Exception) {
-
-            saveCustomLog(
-                "Subnet Error: ${e.localizedMessage}"
-            )
-        }
-
-        return result.toList()
-    }
-
-    private fun isPortOpen(
-        ip: String,
-        port: Int,
-        timeout: Int
-    ): Boolean {
-
-        var socket: Socket? = null
-
-        return try {
-
-            socket = Socket()
-
-            socket.connect(
-                InetSocketAddress(
-                    ip,
-                    port
-                ),
-                timeout
-            )
-
-            true
-
-        } catch (_: Exception) {
-
-            false
-
-        } finally {
-
-            runCatching {
-                socket?.close()
             }
         }
     }
 
     private fun saveCustomLog(
-        message: String
+        msg: String
     ) {
 
         runCatching {
@@ -944,42 +789,213 @@ class CarrotMainScreen(
             val file =
                 File(
                     carContext.filesDir,
-                    "carrot_auto_log.txt"
+                    "carrot_crash.txt"
                 )
 
             file.appendText(
-                "${System.currentTimeMillis()} : $message\n"
+                "${java.util.Date()}: $msg\n"
             )
         }
     }
 
-    override fun onGetTemplate(): Template {
+    /*
+     * =====================================================
+     * 아래 콤마 탐색 코드는 9d65662 원본 방식 유지
+     * =====================================================
+     */
+    private suspend fun findCommaDeviceIp():
+        String? =
+        coroutineScope {
 
-        return NavigationTemplate.Builder()
+            val localSubnets =
+                getLocalSubnets()
 
+            val candidateSubnets =
+                (
+                    localSubnets +
+                        listOf(
+                            "192.168.43",
+                            "192.168.42",
+                            "192.168.137",
+                            "192.168.225",
+                            "172.20.10",
+                            "10.42.0",
+                            "192.168.0",
+                            "192.168.1",
+                            "192.168.8"
+                        )
+                ).distinct()
+
+            for (
+                subnet in candidateSubnets
+            ) {
+
+                val tasks =
+                    (2..254).map { i ->
+
+                        async(
+                            Dispatchers.IO
+                        ) {
+
+                            val testIp =
+                                "$subnet.$i"
+
+                            if (
+                                isPortOpen(
+                                    testIp,
+                                    7000,
+                                    250
+                                )
+                            ) {
+
+                                testIp
+
+                            } else {
+
+                                null
+                            }
+                        }
+                    }
+
+                val foundIp =
+                    tasks
+                        .awaitAll()
+                        .firstOrNull {
+                            it != null
+                        }
+
+                if (
+                    foundIp != null
+                ) {
+
+                    return@coroutineScope
+                        foundIp
+                }
+            }
+
+            null
+        }
+
+    private fun getLocalSubnets():
+        List<String> {
+
+        val subnets =
+            mutableListOf<String>()
+
+        try {
+
+            val interfaces =
+                Collections.list(
+                    NetworkInterface
+                        .getNetworkInterfaces()
+                )
+
+            for (
+                intf in interfaces
+            ) {
+
+                val addrs =
+                    Collections.list(
+                        intf.inetAddresses
+                    )
+
+                for (
+                    addr in addrs
+                ) {
+
+                    if (
+                        !addr.isLoopbackAddress &&
+                        addr is java.net.Inet4Address
+                    ) {
+
+                        val hostAddress =
+                            addr.hostAddress
+                                ?: continue
+
+                        val lastDot =
+                            hostAddress
+                                .lastIndexOf('.')
+
+                        if (
+                            lastDot > 0
+                        ) {
+
+                            subnets.add(
+                                hostAddress
+                                    .substring(
+                                        0,
+                                        lastDot
+                                    )
+                            )
+                        }
+                    }
+                }
+            }
+
+        } catch (
+            e: Exception
+        ) {
+            /*
+             * 원본처럼 무시
+             */
+        }
+
+        return subnets
+    }
+
+    private fun isPortOpen(
+        ip: String,
+        port: Int,
+        timeoutMs: Int
+    ): Boolean {
+
+        return try {
+
+            Socket().use { socket ->
+
+                socket.connect(
+                    InetSocketAddress(
+                        ip,
+                        port
+                    ),
+                    timeoutMs
+                )
+
+                true
+            }
+
+        } catch (
+            e: Exception
+        ) {
+
+            false
+        }
+    }
+
+    override fun onGetTemplate():
+        Template {
+
+        return NavigationTemplate
+            .Builder()
             .setActionStrip(
 
-                ActionStrip.Builder()
-
+                ActionStrip
+                    .Builder()
                     .addAction(
 
-                        Action.Builder()
-
+                        Action
+                            .Builder()
                             .setTitle(
                                 "재시도"
                             )
-
                             .setOnClickListener {
 
                                 startStreamingPipeline()
                             }
-
                             .build()
                     )
-
                     .build()
             )
-
             .build()
     }
-}
+    }

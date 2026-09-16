@@ -1,286 +1,947 @@
 package com.example.carrothud
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.view.View
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
-import androidx.car.app.model.*
+import androidx.car.app.model.Action
+import androidx.car.app.model.ActionStrip
+import androidx.car.app.model.Template
 import androidx.car.app.navigation.NavigationManager
 import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.InputStream
-import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
-import java.net.URL
 import java.text.SimpleDateFormat
-import java.util.Collections
 import java.util.Date
 import java.util.Locale
 
-class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCallback {
+class CarrotMainScreen(
+    carContext: CarContext
+) : Screen(carContext), SurfaceCallback {
 
     private var surfaceContainer: SurfaceContainer? = null
-    @Volatile private var isRendering = false
+
+    @Volatile
+    private var isRendering = false
+
     private var streamJob: Job? = null
+    private var webView: WebView? = null
+
     private val renderLock = Any()
-    private var lastMessage: String = "콤마4 탐색 중..."
-    @Volatile private var currentBitmap: Bitmap? = null
+
+    private var lastWidth = -1
+    private var lastHeight = -1
 
     init {
         runCatching {
-            val navigationManager = carContext.getCarService(NavigationManager::class.java)
-            navigationManager.setNavigationManagerCallback(object : NavigationManagerCallback {
-                override fun onStopNavigation() {}
-            })
+            val navigationManager =
+                carContext.getCarService(NavigationManager::class.java)
 
-            carContext.getCarService(androidx.car.app.AppManager::class.java)
+            navigationManager.setNavigationManagerCallback(
+                object : NavigationManagerCallback {
+                    override fun onStopNavigation() {
+                    }
+                }
+            )
+
+            carContext
+                .getCarService(androidx.car.app.AppManager::class.java)
                 .setSurfaceCallback(this)
+
+        }.onFailure { e ->
+            saveCustomLog(
+                "Init Exception: ${e.localizedMessage}"
+            )
         }
     }
 
-    private fun saveLogToFile(tag: String, throwable: Throwable) {
-        try {
-            val logFile = File(carContext.filesDir, "carrothud_error.log")
-            val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-            val logContent = "[$time] [$tag] ${throwable.javaClass.name}: ${throwable.localizedMessage}\n${throwable.stackTraceToString()}\n-----------------------------------\n"
-            logFile.appendText(logContent)
-        } catch (e: Exception) {
-            // 파일 쓰기 예외 무시
-        }
-    }
-
-    override fun onSurfaceAvailable(surfaceContainer: SurfaceContainer) {
+    override fun onSurfaceAvailable(
+        surfaceContainer: SurfaceContainer
+    ) {
         synchronized(renderLock) {
             this.surfaceContainer = surfaceContainer
             isRendering = true
         }
-        startStreamingPipeline()
+
+        CoroutineScope(Dispatchers.Main).launch {
+            initWebView()
+            startStreamingPipeline()
+        }
     }
 
-    override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
+    override fun onSurfaceDestroyed(
+        surfaceContainer: SurfaceContainer
+    ) {
         synchronized(renderLock) {
             isRendering = false
             streamJob?.cancel()
             this.surfaceContainer = null
-            currentBitmap?.recycle()
-            currentBitmap = null
+        }
+    }
+
+    /*
+     * Android Auto 화면을 누르면 SurfaceCallback을 통해
+     * 전달된 좌표를 WebView의 웹 페이지 좌표로 변환한 뒤
+     * 해당 HTML 요소를 클릭한다.
+     */
+    override fun onClick(x: Float, y: Float) {
+
+        val wv = webView ?: return
+
+        wv.post {
+
+            if (wv.width <= 0 || wv.height <= 0) {
+                return@post
+            }
+
+            val viewWidth = wv.width.toFloat()
+            val viewHeight = wv.height.toFloat()
+
+            val script = """
+                (function() {
+                    try {
+                        var surfaceX = $x;
+                        var surfaceY = $y;
+
+                        var cssWidth =
+                            window.innerWidth ||
+                            document.documentElement.clientWidth ||
+                            1;
+
+                        var cssHeight =
+                            window.innerHeight ||
+                            document.documentElement.clientHeight ||
+                            1;
+
+                        var cssX =
+                            surfaceX * cssWidth / $viewWidth;
+
+                        var cssY =
+                            surfaceY * cssHeight / $viewHeight;
+
+                        var element =
+                            document.elementFromPoint(
+                                cssX,
+                                cssY
+                            );
+
+                        if (!element) {
+                            return "NO_ELEMENT";
+                        }
+
+                        var target =
+                            element.closest(
+                                'button, a, input, select, textarea, ' +
+                                '[role="button"], [onclick], .btn, .button'
+                            ) || element;
+
+                        try {
+                            if (window.PointerEvent) {
+
+                                target.dispatchEvent(
+                                    new PointerEvent(
+                                        'pointerdown',
+                                        {
+                                            bubbles: true,
+                                            cancelable: true,
+                                            clientX: cssX,
+                                            clientY: cssY,
+                                            pointerType: 'touch'
+                                        }
+                                    )
+                                );
+
+                                target.dispatchEvent(
+                                    new PointerEvent(
+                                        'pointerup',
+                                        {
+                                            bubbles: true,
+                                            cancelable: true,
+                                            clientX: cssX,
+                                            clientY: cssY,
+                                            pointerType: 'touch'
+                                        }
+                                    )
+                                );
+                            }
+                        } catch (ignore) {
+                        }
+
+                        if (
+                            typeof target.click ===
+                            'function'
+                        ) {
+                            target.click();
+                        } else {
+
+                            target.dispatchEvent(
+                                new MouseEvent(
+                                    'click',
+                                    {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        clientX: cssX,
+                                        clientY: cssY
+                                    }
+                                )
+                            );
+                        }
+
+                        return (
+                            target.tagName +
+                            ":" +
+                            (
+                                target.innerText ||
+                                target.textContent ||
+                                ""
+                            )
+                            .trim()
+                            .slice(0, 50)
+                        );
+
+                    } catch (e) {
+                        return "JS_ERROR:" + e;
+                    }
+                })();
+            """.trimIndent()
+
+            wv.evaluateJavascript(script) { result ->
+                saveCustomLog(
+                    "AutoTouch x=$x y=$y result=$result"
+                )
+            }
+        }
+    }
+
+    private fun initWebView() {
+
+        if (webView != null) {
+            return
+        }
+
+        webView = WebView(carContext).apply {
+
+            /*
+             * Surface에 직접 그릴 것이므로
+             * software rendering 사용.
+             */
+            setLayerType(
+                View.LAYER_TYPE_SOFTWARE,
+                null
+            )
+
+            settings.apply {
+
+                javaScriptEnabled = true
+                domStorageEnabled = true
+
+                mediaPlaybackRequiresUserGesture = false
+
+                /*
+                 * 휴대폰 WebView와 최대한 동일한
+                 * viewport 동작을 사용한다.
+                 */
+                useWideViewPort = true
+                loadWithOverviewMode = true
+
+                /*
+                 * Android Auto에서 WebView가
+                 * 글자를 임의로 확대하지 않도록 고정.
+                 */
+                textZoom = 100
+
+                layoutAlgorithm =
+                    WebSettings.LayoutAlgorithm.NORMAL
+
+                /*
+                 * WebView 자체 확대 기능은 사용하지 않는다.
+                 */
+                setSupportZoom(false)
+                builtInZoomControls = false
+                displayZoomControls = false
+
+                mixedContentMode =
+                    WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            }
+
+            webViewClient =
+                object : WebViewClient() {
+
+                    override fun onPageFinished(
+                        view: WebView?,
+                        url: String?
+                    ) {
+                        super.onPageFinished(
+                            view,
+                            url
+                        )
+
+                        /*
+                         * Android Auto WebView에서
+                         * text autosizing / viewport 차이로
+                         * 연비 등의 글씨 크기가 달라지는 것을
+                         * 최대한 방지한다.
+                         */
+                        val displayFixScript = """
+                            (function() {
+                                try {
+
+                                    document.documentElement.style
+                                        .setProperty(
+                                            '-webkit-text-size-adjust',
+                                            '100%',
+                                            'important'
+                                        );
+
+                                    if (document.body) {
+                                        document.body.style
+                                            .setProperty(
+                                                '-webkit-text-size-adjust',
+                                                '100%',
+                                                'important'
+                                            );
+                                    }
+
+                                    var viewport =
+                                        document.querySelector(
+                                            'meta[name="viewport"]'
+                                        );
+
+                                    if (
+                                        !viewport &&
+                                        document.head
+                                    ) {
+                                        viewport =
+                                            document.createElement(
+                                                'meta'
+                                            );
+
+                                        viewport.name =
+                                            'viewport';
+
+                                        document.head.appendChild(
+                                            viewport
+                                        );
+                                    }
+
+                                    if (viewport) {
+
+                                        var content =
+                                            viewport.getAttribute(
+                                                'content'
+                                            ) || '';
+
+                                        if (
+                                            !/initial-scale\s*=/
+                                                .test(content)
+                                        ) {
+                                            content +=
+                                                (content ? ',' : '') +
+                                                'initial-scale=1';
+                                        }
+
+                                        if (
+                                            !/maximum-scale\s*=/
+                                                .test(content)
+                                        ) {
+                                            content +=
+                                                (content ? ',' : '') +
+                                                'maximum-scale=1';
+                                        }
+
+                                        if (
+                                            !/user-scalable\s*=/
+                                                .test(content)
+                                        ) {
+                                            content +=
+                                                (content ? ',' : '') +
+                                                'user-scalable=no';
+                                        }
+
+                                        viewport.setAttribute(
+                                            'content',
+                                            content
+                                        );
+                                    }
+
+                                } catch (e) {
+                                }
+                            })();
+                        """.trimIndent()
+
+                        view?.evaluateJavascript(
+                            displayFixScript,
+                            null
+                        )
+
+                        /*
+                         * 기존 당근 비전 자동 시작 기능.
+                         */
+                        val autoStartScript = """
+                            (function() {
+
+                                var attempts = 0;
+
+                                var autoClicker =
+                                    setInterval(
+                                        function() {
+
+                                            attempts++;
+
+                                            var allElements =
+                                                document
+                                                .getElementsByTagName(
+                                                    '*'
+                                                );
+
+                                            for (
+                                                var i = 0;
+                                                i < allElements.length;
+                                                i++
+                                            ) {
+
+                                                var el =
+                                                    allElements[i];
+
+                                                var txt =
+                                                    (
+                                                        el.innerText ||
+                                                        el.textContent ||
+                                                        ''
+                                                    ).trim();
+
+                                                if (
+                                                    txt.indexOf(
+                                                        '당근 비전 시작'
+                                                    ) !== -1 ||
+                                                    txt.indexOf(
+                                                        '비전 시작'
+                                                    ) !== -1
+                                                ) {
+
+                                                    el.click();
+
+                                                    if (
+                                                        el.parentElement
+                                                    ) {
+                                                        el.parentElement
+                                                            .click();
+                                                    }
+                                                }
+                                            }
+
+                                            if (
+                                                attempts > 20
+                                            ) {
+                                                clearInterval(
+                                                    autoClicker
+                                                );
+                                            }
+
+                                        },
+                                        500
+                                    );
+                            })();
+                        """.trimIndent()
+
+                        view?.evaluateJavascript(
+                            autoStartScript,
+                            null
+                        )
+                    }
+                }
         }
     }
 
     private fun startStreamingPipeline() {
+
         streamJob?.cancel()
-        streamJob = CoroutineScope(Dispatchers.IO).launch {
-            updateMessage("콤마4 탐색 중...")
-            val commaIp = findCommaDeviceIp()
 
-            if (commaIp == null) {
-                updateMessage("콤마4(포트 7000) 탐색 실패\n서브넷 확인 필요\n재시도 중...")
-                delay(3000)
-                if (isRendering) startStreamingPipeline()
-                return@launch
+        streamJob =
+            CoroutineScope(
+                Dispatchers.IO
+            ).launch {
+
+                drawMessage(
+                    "콤마4 탐색 중..."
+                )
+
+                val commaIp =
+                    findCommaDeviceIp()
+
+                if (commaIp == null) {
+
+                    drawMessage(
+                        "콤마4(포트 7000)를 찾지 못함"
+                    )
+
+                    delay(2000)
+
+                    if (isRendering) {
+                        startStreamingPipeline()
+                    }
+
+                    return@launch
+                }
+
+                drawMessage(
+                    "영상 스트리밍 연결 중..."
+                )
+
+                val visionUrl =
+                    "http://$commaIp:7000"
+
+                saveCustomLog(
+                    "Vision URL: $visionUrl"
+                )
+
+                withContext(
+                    Dispatchers.Main
+                ) {
+                    webView?.loadUrl(
+                        visionUrl
+                    )
+                }
+
+                startSurfaceRenderLoop()
+            }
+    }
+
+    private suspend fun startSurfaceRenderLoop() {
+
+        while (isRendering) {
+
+            withContext(
+                Dispatchers.Main
+            ) {
+
+                val container =
+                    surfaceContainer
+                        ?: return@withContext
+
+                val surface =
+                    container.surface
+                        ?: return@withContext
+
+                val wv =
+                    webView
+                        ?: return@withContext
+
+                if (
+                    !surface.isValid ||
+                    !isRendering
+                ) {
+                    return@withContext
+                }
+
+                /*
+                 * Android Auto가 실제 제공한
+                 * Surface 크기를 그대로 사용한다.
+                 *
+                 * 고정 1280x720 UI로 변환하지 않는다.
+                 */
+                val width =
+                    if (container.width > 0)
+                        container.width
+                    else
+                        1280
+
+                val height =
+                    if (container.height > 0)
+                        container.height
+                    else
+                        720
+
+                if (
+                    width != lastWidth ||
+                    height != lastHeight
+                ) {
+
+                    lastWidth = width
+                    lastHeight = height
+
+                    wv.measure(
+                        View.MeasureSpec.makeMeasureSpec(
+                            width,
+                            View.MeasureSpec.EXACTLY
+                        ),
+                        View.MeasureSpec.makeMeasureSpec(
+                            height,
+                            View.MeasureSpec.EXACTLY
+                        )
+                    )
+
+                    wv.layout(
+                        0,
+                        0,
+                        width,
+                        height
+                    )
+
+                    saveCustomLog(
+                        "Surface size: ${width}x${height}"
+                    )
+                }
+
+                var canvas: Canvas? = null
+
+                try {
+
+                    canvas =
+                        surface.lockCanvas(
+                            null
+                        )
+
+                    if (canvas != null) {
+                        wv.draw(canvas)
+                    }
+
+                } catch (t: Throwable) {
+
+                    saveCustomLog(
+                        "Render Loop Crash: " +
+                        "${t.localizedMessage}"
+                    )
+
+                } finally {
+
+                    if (canvas != null) {
+
+                        runCatching {
+                            surface
+                                .unlockCanvasAndPost(
+                                    canvas
+                                )
+                        }
+                    }
+                }
             }
 
-            updateMessage("스트리밍 연결 중: $commaIp")
-            runMjpegStream(commaIp)
+            /*
+             * 약 30fps
+             */
+            delay(33)
         }
     }
 
-    private suspend fun runMjpegStream(ip: String) {
-        var connection: HttpURLConnection? = null
-        var inputStream: InputStream? = null
+    private fun drawMessage(
+        message: String
+    ) {
+
+        val container =
+            surfaceContainer ?: return
+
+        val surface =
+            container.surface ?: return
+
+        if (!surface.isValid) {
+            return
+        }
+
+        var canvas: Canvas? = null
+
         try {
-            val url = URL("http://$ip:7000")
-            connection = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3000
-                readTimeout = 5000
-                connect()
-            }
-            inputStream = connection.inputStream
-            updateMessage("스트리밍 연결 성공")
 
-            val buffer = ByteArray(16384)
-            val bos = ByteArrayOutputStream()
+            canvas =
+                surface.lockCanvas(
+                    null
+                )
 
-            while (isRendering) {
-                val bytesRead = inputStream.read(buffer)
-                if (bytesRead == -1) break
-                bos.write(buffer, 0, bytesRead)
+            canvas.drawColor(
+                Color.BLACK
+            )
 
-                val bytes = bos.toByteArray()
-                var startIndex = -1
-                var endIndex = -1
+            val paint =
+                Paint(
+                    Paint.ANTI_ALIAS_FLAG
+                ).apply {
 
-                for (i in 0 until bytes.size - 1) {
-                    if ((bytes[i].toInt() and 0xFF) == 0xFF && (bytes[i + 1].toInt() and 0xFF) == 0xD8) {
-                        startIndex = i
-                        break
-                    }
+                    color =
+                        Color.WHITE
+
+                    textSize =
+                        42f
                 }
 
-                if (startIndex != -1) {
-                    for (i in startIndex + 2 until bytes.size - 1) {
-                        if ((bytes[i].toInt() and 0xFF) == 0xFF && (bytes[i + 1].toInt() and 0xFF) == 0xD9) {
-                            endIndex = i + 2
-                            break
-                        }
-                    }
-                }
+            canvas.drawText(
+                message,
+                50f,
+                100f,
+                paint
+            )
 
-                if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
-                    try {
-                        val bitmap = BitmapFactory.decodeByteArray(bytes, startIndex, endIndex - startIndex)
-                        if (bitmap != null) {
-                            synchronized(renderLock) {
-                                currentBitmap?.recycle()
-                                currentBitmap = bitmap
-                            }
-                        }
-                    } catch (e: Exception) {
-                        saveLogToFile("BitmapDecodeError", e)
-                    }
-
-                    bos.reset()
-                    if (endIndex < bytes.size) {
-                        bos.write(bytes, endIndex, bytes.size - endIndex)
-                    }
-                } else if (bytes.size > 2 * 1024 * 1024) {
-                    bos.reset()
-                }
-
-                renderFrame()
-            }
         } catch (e: Exception) {
-            saveLogToFile("StreamError", e)
-            android.util.Log.e("CarrotHUD", "Stream error", e)
-            updateMessage("오류 발생:\n${e.javaClass.simpleName}: ${e.localizedMessage}")
-            delay(3000)
-            if (isRendering) {
-                runMjpegStream(ip)
-            }
+
+            saveCustomLog(
+                "drawMessage error: " +
+                "${e.localizedMessage}"
+            )
+
         } finally {
-            try { inputStream?.close() } catch (e: Exception) {}
-            try { connection?.disconnect() } catch (e: Exception) {}
-        }
-    }
 
-    private fun updateMessage(msg: String) {
-        lastMessage = msg
-        renderFrame()
-    }
+            if (canvas != null) {
 
-    private fun renderFrame() {
-        synchronized(renderLock) {
-            val container = surfaceContainer ?: return
-            val surface = container.surface ?: return
-            if (!surface.isValid || !isRendering) return
-
-            var canvas: Canvas? = null
-            try {
-                canvas = surface.lockCanvas(null)
-                if (canvas != null) {
-                    val width = if (container.width > 0) container.width else canvas.width
-                    val height = if (container.height > 0) container.height else canvas.height
-
-                    canvas.drawColor(Color.BLACK)
-
-                    val bmp = currentBitmap
-                    if (bmp != null && !bmp.isRecycled) {
-                        val srcRect = android.graphics.Rect(0, 0, bmp.width, bmp.height)
-                        val destRect = android.graphics.Rect(0, 0, width, height)
-                        canvas.drawBitmap(bmp, srcRect, destRect, null)
-                    } else {
-                        val paint = Paint().apply {
-                            color = Color.WHITE
-                            textSize = 28f
-                            textAlign = Paint.Align.CENTER
-                            isAntiAlias = true
-                        }
-                        val lines = lastMessage.split("\n")
-                        val startY = height / 2f - (lines.size * 18f)
-                        lines.forEachIndexed { index, line ->
-                            canvas.drawText(line, width / 2f, startY + (index * 35f), paint)
-                        }
-                    }
-                }
-            } catch (t: Throwable) {
-                saveLogToFile("RenderError", t)
-                android.util.Log.e("CarrotHUD", "Render error", t)
-            } finally {
-                if (canvas != null) {
-                    runCatching { surface.unlockCanvasAndPost(canvas) }
+                runCatching {
+                    surface
+                        .unlockCanvasAndPost(
+                            canvas
+                        )
                 }
             }
         }
     }
 
-    private suspend fun findCommaDeviceIp(): String? = coroutineScope {
-        val localSubnets = getLocalSubnets()
-        val candidateSubnets = (localSubnets + listOf(
-            "192.168.43", "192.168.42", "192.168.137", "192.168.225",
-            "172.20.10", "10.42.0", "192.168.0", "192.168.1", "192.168.8"
-        )).distinct()
+    private fun findCommaDeviceIp(): String? {
 
-        for (subnet in candidateSubnets) {
-            val tasks = (2..254).map { i ->
-                async(Dispatchers.IO) {
-                    val testIp = "$subnet.$i"
-                    if (isPortOpen(testIp, 7000, 200)) testIp else null
+        /*
+         * 먼저 현재 Android 기기가 연결된
+         * 네트워크 인터페이스에서 IPv4 주소를 찾는다.
+         */
+        val subnets =
+            getLocalSubnets()
+
+        saveCustomLog(
+            "Local subnets: $subnets"
+        )
+
+        /*
+         * 자주 사용되는 comma 주소를 먼저 확인.
+         */
+        val preferredHosts =
+            listOf(
+                "192.168.43.1",
+                "192.168.0.1",
+                "192.168.1.1"
+            )
+
+        for (host in preferredHosts) {
+
+            if (isPortOpen(host, 7000)) {
+
+                saveCustomLog(
+                    "Comma found: $host"
+                )
+
+                return host
+            }
+        }
+
+        /*
+         * 현재 연결된 /24 네트워크를 검색.
+         */
+        for (subnet in subnets) {
+
+            for (i in 1..254) {
+
+                if (!isRendering) {
+                    return null
+                }
+
+                val host =
+                    "$subnet.$i"
+
+                if (
+                    isPortOpen(
+                        host,
+                        7000,
+                        35
+                    )
+                ) {
+
+                    saveCustomLog(
+                        "Comma found: $host"
+                    )
+
+                    return host
                 }
             }
-            val foundIp = tasks.awaitAll().firstOrNull { t -> t != null }
-            if (foundIp != null) return@coroutineScope foundIp
         }
-        null
+
+        return null
     }
 
-    private fun getLocalSubnets(): List<String> {
-        val subnets = mutableListOf<String>()
+    private fun getLocalSubnets():
+        List<String> {
+
+        val result =
+            mutableListOf<String>()
+
         try {
-            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-            for (intf in interfaces) {
-                val addrs = Collections.list(intf.inetAddresses)
-                for (addr in addrs) {
-                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                        val hostAddress = addr.hostAddress ?: continue
-                        val lastDot = hostAddress.lastIndexOf('.')
-                        if (lastDot > 0) {
-                            subnets.add(hostAddress.substring(0, lastDot))
+
+            val interfaces =
+                NetworkInterface
+                    .getNetworkInterfaces()
+
+            while (
+                interfaces.hasMoreElements()
+            ) {
+
+                val network =
+                    interfaces.nextElement()
+
+                if (
+                    !network.isUp ||
+                    network.isLoopback
+                ) {
+                    continue
+                }
+
+                val addresses =
+                    network.inetAddresses
+
+                while (
+                    addresses.hasMoreElements()
+                ) {
+
+                    val address =
+                        addresses.nextElement()
+
+                    val host =
+                        address.hostAddress
+                            ?: continue
+
+                    /*
+                     * IPv4만 사용.
+                     */
+                    if (
+                        host.contains(":")
+                    ) {
+                        continue
+                    }
+
+                    val parts =
+                        host.split(".")
+
+                    if (
+                        parts.size == 4
+                    ) {
+
+                        val subnet =
+                            "${parts[0]}." +
+                            "${parts[1]}." +
+                            "${parts[2]}"
+
+                        if (
+                            !result.contains(
+                                subnet
+                            )
+                        ) {
+                            result.add(
+                                subnet
+                            )
                         }
                     }
                 }
             }
-        } catch (e: Exception) {}
-        return subnets
+
+        } catch (e: Exception) {
+
+            saveCustomLog(
+                "Subnet error: " +
+                "${e.localizedMessage}"
+            )
+        }
+
+        return result
     }
 
-    private fun isPortOpen(ip: String, port: Int, timeoutMs: Int): Boolean {
+    private fun isPortOpen(
+        host: String,
+        port: Int,
+        timeout: Int = 100
+    ): Boolean {
+
+        var socket: Socket? = null
+
         return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, port), timeoutMs)
-                true
-            }
-        } catch (e: Exception) {
+
+            socket =
+                Socket()
+
+            socket.connect(
+                InetSocketAddress(
+                    host,
+                    port
+                ),
+                timeout
+            )
+
+            true
+
+        } catch (_: Exception) {
+
             false
+
+        } finally {
+
+            runCatching {
+                socket?.close()
+            }
         }
     }
 
-    override fun onGetTemplate(): Template {
-        return NavigationTemplate.Builder()
+    private fun saveCustomLog(
+        message: String
+    ) {
+
+        runCatching {
+
+            val formatter =
+                SimpleDateFormat(
+                    "yyyy-MM-dd HH:mm:ss.SSS",
+                    Locale.getDefault()
+                )
+
+            val line =
+                "${formatter.format(Date())} " +
+                "$message\n"
+
+            val directory =
+                carContext
+                    .getExternalFilesDir(
+                        null
+                    )
+                    ?: return@runCatching
+
+            val logFile =
+                File(
+                    directory,
+                    "carrot_hud.log"
+                )
+
+            logFile.appendText(
+                line
+            )
+        }
+    }
+
+    override fun onGetTemplate():
+        Template {
+
+        return NavigationTemplate
+            .Builder()
             .setActionStrip(
-                ActionStrip.Builder()
+
+                ActionStrip
+                    .Builder()
                     .addAction(
-                        Action.Builder()
-                            .setTitle("재시도")
+
+                        Action
+                            .Builder()
+                            .setTitle(
+                                "재시도"
+                            )
                             .setOnClickListener {
                                 startStreamingPipeline()
                             }

@@ -8,9 +8,10 @@
 
     <application
         android:allowBackup="true"
+        android:label="당근HUD"
         android:supportsRtl="true">
 
-        <!-- 안드로이드 오토 앱 인식용 메타데이터 -->
+        <!-- 안드로이드 오토 메타데이터 -->
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />
@@ -18,16 +19,19 @@
         <!-- 안드로이드 오토 서비스 바인딩 -->
         <service
             android:name="com.example.carrothud.CarrotCarAppService"
-            android:exported="true">
+            android:exported="true"
+            android:label="당근HUD">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.NAVIGATION" />
                 <category android:name="com.google.android.gms.car.category.CATEGORY_PROJECTION_DEFAULT" />
             </intent-filter>
         </service>
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:label="당근HUD">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

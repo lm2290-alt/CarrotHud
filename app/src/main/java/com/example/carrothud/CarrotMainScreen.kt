@@ -3,11 +3,11 @@ package com.example.carrothud
 import android.graphics.Color
 import android.graphics.Paint
 import android.os.SystemClock
-import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.car.app.AppManager
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
@@ -19,28 +19,29 @@ import androidx.car.app.navigation.NavigationManager
 import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
-import java.io.File
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.util.Collections
 
-class CarrotMainScreen(carContext: CarContext) :
-    Screen(carContext), SurfaceCallback {
+class CarrotMainScreen(
+    carContext: CarContext
+) : Screen(carContext), SurfaceCallback {
 
     companion object {
         private const val WEB_W = 1280
         private const val WEB_H = 720
     }
 
-    private var surfaceContainer: SurfaceContainer? = null
+    private var surfaceContainer:
+        SurfaceContainer? = null
+
+    private var webView: WebView? = null
+    private var streamJob: Job? = null
 
     @Volatile
-    private var isRendering = false
-
-    private var streamJob: Job? = null
-    private var webView: WebView? = null
+    private var rendering = false
 
     @Volatile
     private var renderW = 0
@@ -59,18 +60,17 @@ class CarrotMainScreen(carContext: CarContext) :
 
     init {
         runCatching {
-            val nm = carContext.getCarService(
+            carContext.getCarService(
                 NavigationManager::class.java
-            )
-
-            nm.setNavigationManagerCallback(
-                object : NavigationManagerCallback {
+            ).setNavigationManagerCallback(
+                object :
+                    NavigationManagerCallback {
                     override fun onStopNavigation() {}
                 }
             )
 
             carContext.getCarService(
-                androidx.car.app.AppManager::class.java
+                AppManager::class.java
             ).setSurfaceCallback(this)
         }
     }
@@ -79,157 +79,192 @@ class CarrotMainScreen(carContext: CarContext) :
         container: SurfaceContainer
     ) {
         surfaceContainer = container
-        isRendering = true
-        renderW = 0
-        renderH = 0
+        rendering = true
 
-        CoroutineScope(Dispatchers.Main).launch {
+        CoroutineScope(
+            Dispatchers.Main
+        ).launch {
             initWebView()
-            startStreamingPipeline()
+            startPipeline()
         }
     }
 
     override fun onSurfaceDestroyed(
         container: SurfaceContainer
     ) {
-        isRendering = false
+        rendering = false
         streamJob?.cancel()
         streamJob = null
         surfaceContainer = null
-        renderW = 0
-        renderH = 0
     }
 
-    override fun onClick(x: Float, y: Float) {
+    override fun onClick(
+        x: Float,
+        y: Float
+    ) {
         val wv = webView ?: return
+        val sw = renderW
+        val sh = renderH
 
         touchX = x
         touchY = y
         touchUntil =
-            SystemClock.uptimeMillis() + 1000
-
-        val sw = renderW
-        val sh = renderH
+            SystemClock.uptimeMillis() + 700
 
         if (sw <= 0 || sh <= 0) return
 
         val wx =
-            x / (sw / WEB_W.toFloat())
+            x * WEB_W / sw.toFloat()
 
         val wy =
-            y / (sh / WEB_H.toFloat())
+            y * WEB_H / sh.toFloat()
 
         if (
-            wx !in 0f..WEB_W.toFloat() ||
-            wy !in 0f..WEB_H.toFloat()
+            wx < 0 ||
+            wy < 0 ||
+            wx > WEB_W ||
+            wy > WEB_H
         ) return
 
+        val ix = wx.toInt()
+        val iy = wy.toInt()
+
         wv.post {
-            val now =
-                SystemClock.uptimeMillis()
+            val js =
+                """
+                (function(){
+                  var x=$ix,y=$iy;
+                  var e=document.elementFromPoint(x,y);
+                  if(!e)return;
 
-            val down = MotionEvent.obtain(
-                now,
-                now,
-                MotionEvent.ACTION_DOWN,
-                wx,
-                wy,
-                0
-            )
+                  var t=e.closest(
+                    'button,a,input,label,[role="button"],[onclick]'
+                  )||e;
 
-            val up = MotionEvent.obtain(
-                now,
-                now + 60,
-                MotionEvent.ACTION_UP,
-                wx,
-                wy,
-                0
-            )
+                  function fire(name,Type){
+                    try{
+                      t.dispatchEvent(
+                        new Type(name,{
+                          bubbles:true,
+                          cancelable:true,
+                          composed:true,
+                          clientX:x,
+                          clientY:y,
+                          screenX:x,
+                          screenY:y,
+                          button:0,
+                          buttons:
+                            (name.indexOf('down')>=0 ? 1 : 0),
+                          pointerId:1,
+                          pointerType:'touch',
+                          isPrimary:true
+                        })
+                      );
+                    }catch(z){}
+                  }
 
-            try {
-                wv.dispatchTouchEvent(down)
-                wv.dispatchTouchEvent(up)
+                  if(window.PointerEvent){
+                    fire('pointerdown',PointerEvent);
+                  }
 
-                val js =
-                    "(function(){" +
-                    "var x=${wx.toInt()}," +
-                    "y=${wy.toInt()};" +
-                    "var e=document.elementFromPoint(x,y);" +
-                    "if(!e)return;" +
-                    "var t=e.closest(" +
-                    "'button,a,input,[role=\"button\"],[onclick]'" +
-                    ")||e;" +
-                    "try{" +
-                    "t.dispatchEvent(new PointerEvent(" +
-                    "'pointerdown',{bubbles:true,clientX:x,clientY:y}));" +
-                    "t.dispatchEvent(new PointerEvent(" +
-                    "'pointerup',{bubbles:true,clientX:x,clientY:y}));" +
-                    "t.dispatchEvent(new MouseEvent(" +
-                    "'mousedown',{bubbles:true,clientX:x,clientY:y}));" +
-                    "t.dispatchEvent(new MouseEvent(" +
-                    "'mouseup',{bubbles:true,clientX:x,clientY:y}));" +
-                    "t.dispatchEvent(new MouseEvent(" +
-                    "'click',{bubbles:true,clientX:x,clientY:y}));" +
-                    "}catch(z){if(t.click)t.click();}" +
-                    "})();"
+                  fire('mousedown',MouseEvent);
 
-                wv.evaluateJavascript(js, null)
+                  if(window.PointerEvent){
+                    fire('pointerup',PointerEvent);
+                  }
 
-            } finally {
-                down.recycle()
-                up.recycle()
-            }
+                  fire('mouseup',MouseEvent);
+                  fire('click',MouseEvent);
+
+                  try{
+                    if(
+                      t.tagName==='BUTTON' ||
+                      t.tagName==='A'
+                    ) t.click();
+                  }catch(z){}
+                })();
+                """.trimIndent()
+
+            wv.evaluateJavascript(js, null)
         }
     }
 
     private fun initWebView() {
-        if (webView != null) return
-
-        webView = WebView(carContext).apply {
-
-            setLayerType(
-                View.LAYER_TYPE_HARDWARE,
-                null
-            )
-
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                mediaPlaybackRequiresUserGesture = false
-                useWideViewPort = true
-                loadWithOverviewMode = false
-                textZoom = 100
-
-                layoutAlgorithm =
-                    WebSettings.LayoutAlgorithm.NORMAL
-
-                setSupportZoom(false)
-                builtInZoomControls = false
-                displayZoomControls = false
-
-                mixedContentMode =
-                    WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            }
-
-            webViewClient =
-                object : WebViewClient() {
-                    override fun onPageFinished(
-                        view: WebView?,
-                        url: String?
-                    ) {
-                        super.onPageFinished(
-                            view,
-                            url
-                        )
-
-                        fixDisplay(view)
-                        autoStartVision(view)
-                        installVideoMirror(view)
-                    }
-                }
+        if (webView != null) {
+            webView?.onResume()
+            webView?.resumeTimers()
+            return
         }
 
+        webView =
+            WebView(carContext).apply {
+
+                setLayerType(
+                    View.LAYER_TYPE_HARDWARE,
+                    null
+                )
+
+                setRendererPriorityPolicy(
+                    WebView.RENDERER_PRIORITY_IMPORTANT,
+                    false
+                )
+
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+
+                    mediaPlaybackRequiresUserGesture =
+                        false
+
+                    useWideViewPort = true
+                    loadWithOverviewMode = false
+                    textZoom = 100
+
+                    layoutAlgorithm =
+                        WebSettings
+                            .LayoutAlgorithm.NORMAL
+
+                    setSupportZoom(false)
+
+                    builtInZoomControls =
+                        false
+
+                    displayZoomControls =
+                        false
+
+                    mixedContentMode =
+                        WebSettings
+                            .MIXED_CONTENT_ALWAYS_ALLOW
+                }
+
+                webViewClient =
+                    object : WebViewClient() {
+
+                        override fun onPageFinished(
+                            view: WebView?,
+                            url: String?
+                        ) {
+                            super.onPageFinished(
+                                view,
+                                url
+                            )
+
+                            view?.onResume()
+                            view?.resumeTimers()
+
+                            fixLayout(view)
+
+                            startVisionOnce(view)
+
+                            installVideoMirror(view)
+                        }
+                    }
+            }
+
         layoutWebView()
+
+        webView?.onResume()
+        webView?.resumeTimers()
     }
 
     private fun layoutWebView() {
@@ -254,188 +289,294 @@ class CarrotMainScreen(carContext: CarContext) :
         )
     }
 
-    private fun fixDisplay(view: WebView?) {
+    private fun fixLayout(
+        view: WebView?
+    ) {
         val js =
-            "(function(){" +
-            "var m=document.querySelector('meta[name=\"viewport\"]');" +
-            "if(!m){" +
-            "m=document.createElement('meta');" +
-            "m.name='viewport';" +
-            "document.head.appendChild(m);" +
-            "}" +
-            "m.content=" +
-            "'width=1280,height=720," +
-            "initial-scale=1,maximum-scale=1,user-scalable=no';" +
-            "var s=document.createElement('style');" +
-            "s.id='aaFixedLayout';" +
-            "s.textContent=" +
-            "'html,body{" +
-            "width:1280px!important;" +
-            "height:720px!important;" +
-            "min-width:1280px!important;" +
-            "max-width:1280px!important;" +
-            "min-height:720px!important;" +
-            "max-height:720px!important;" +
-            "margin:0!important;" +
-            "padding:0!important;" +
-            "overflow:hidden!important;" +
-            "-webkit-text-size-adjust:100%!important;" +
-            "}' +" +
-            "'*,*::before,*::after{" +
-            "animation-duration:0s!important;" +
-            "transition-duration:0s!important;" +
-            "}';" +
-            "document.head.appendChild(s);" +
-            "})();"
+            """
+            (function(){
+              if(document.getElementById(
+                'carrotAaFixed'
+              ))return;
+
+              var m=document.querySelector(
+                'meta[name="viewport"]'
+              );
+
+              if(!m){
+                m=document.createElement('meta');
+                m.name='viewport';
+                document.head.appendChild(m);
+              }
+
+              m.content=
+                'width=1280,height=720,'+
+                'initial-scale=1,'+
+                'maximum-scale=1,'+
+                'user-scalable=no';
+
+              var s=document.createElement(
+                'style'
+              );
+
+              s.id='carrotAaFixed';
+
+              s.textContent=
+                'html,body{'+
+                'width:1280px!important;'+
+                'height:720px!important;'+
+                'min-width:1280px!important;'+
+                'max-width:1280px!important;'+
+                'min-height:720px!important;'+
+                'max-height:720px!important;'+
+                'margin:0!important;'+
+                'padding:0!important;'+
+                'overflow:hidden!important;'+
+                '-webkit-text-size-adjust:100%!important;'+
+                '}';
+
+              document.head.appendChild(s);
+              window.scrollTo(0,0);
+            })();
+            """.trimIndent()
 
         view?.evaluateJavascript(js, null)
     }
 
-    private fun autoStartVision(view: WebView?) {
+    private fun startVisionOnce(
+        view: WebView?
+    ) {
         val js =
-            "(function(){" +
-            "var n=0;" +
-            "var z=setInterval(function(){" +
-            "n++;" +
-            "var a=document.getElementsByTagName('*');" +
-            "for(var i=0;i<a.length;i++){" +
-            "var e=a[i];" +
-            "var t=(e.innerText||e.textContent||'').trim();" +
-            "if(t.indexOf('당근 비전 시작')!==-1||" +
-            "t.indexOf('비전 시작')!==-1)e.click();" +
-            "}" +
-            "if(n>20)clearInterval(z);" +
-            "},500);" +
-            "})();"
+            """
+            (function(){
+              if(window.__carrotAaStarted)return;
+              window.__carrotAaStarted=true;
+
+              var tries=0;
+
+              var timer=setInterval(function(){
+                tries++;
+
+                var nodes=document.querySelectorAll(
+                  'button,[role="button"]'
+                );
+
+                for(var i=0;i<nodes.length;i++){
+                  var t=(
+                    nodes[i].innerText||
+                    nodes[i].textContent||
+                    ''
+                  ).trim();
+
+                  if(
+                    t==='당근 비전 시작' ||
+                    t==='비전 시작'
+                  ){
+                    clearInterval(timer);
+                    nodes[i].click();
+                    return;
+                  }
+                }
+
+                if(tries>=20){
+                  clearInterval(timer);
+                }
+              },250);
+            })();
+            """.trimIndent()
 
         view?.evaluateJavascript(js, null)
     }
 
-    private fun installVideoMirror(view: WebView?) {
+    private fun installVideoMirror(
+        view: WebView?
+    ) {
         val js =
-            "(function(){" +
-            "if(window.__carrotAaMirror)return;" +
-            "window.__carrotAaMirror=true;" +
+            """
+            (function(){
+              if(window.__carrotAaMirror)return;
+              window.__carrotAaMirror=true;
 
-            "function start(){" +
-            "var v=document.getElementById('carrotRoadVideo');" +
-            "if(!v){setTimeout(start,500);return;}" +
+              function start(){
+                var v=document.getElementById(
+                  'carrotRoadVideo'
+                );
 
-            "var p=v.parentElement;" +
-            "if(!p){setTimeout(start,500);return;}" +
+                if(!v){
+                  setTimeout(start,300);
+                  return;
+                }
 
-            "if(document.getElementById(" +
-            "'carrotAaVideoMirror'))return;" +
+                var p=v.parentElement;
 
-            "var c=document.createElement('canvas');" +
-            "c.id='carrotAaVideoMirror';" +
-            "c.style.position='absolute';" +
-            "c.style.left='0';" +
-            "c.style.top='0';" +
-            "c.style.width='100%';" +
-            "c.style.height='100%';" +
-            "c.style.zIndex='0';" +
-            "c.style.pointerEvents='none';" +
+                if(!p){
+                  setTimeout(start,300);
+                  return;
+                }
 
-            "p.insertBefore(c,v);" +
-            "v.style.visibility='hidden';" +
+                var old=document.getElementById(
+                  'carrotAaVideoMirror'
+                );
 
-            "var ctx=c.getContext('2d',{alpha:false});" +
+                if(old)return;
 
-            "function draw(){" +
-            "if(v.videoWidth>0&&v.videoHeight>0){" +
+                var c=document.createElement(
+                  'canvas'
+                );
 
-            "var cw=p.clientWidth||1280;" +
-            "var ch=p.clientHeight||720;" +
+                c.id='carrotAaVideoMirror';
 
-            "var q=Math.min(2," +
-            "Math.max(1,v.videoWidth/cw));" +
+                c.style.position='absolute';
+                c.style.left='0';
+                c.style.top='0';
+                c.style.width='100%';
+                c.style.height='100%';
+                c.style.zIndex='0';
+                c.style.pointerEvents='none';
+                c.style.background='#000';
 
-            "var bw=Math.round(cw*q);" +
-            "var bh=Math.round(ch*q);" +
+                p.insertBefore(c,v);
 
-            "if(c.width!==bw)c.width=bw;" +
-            "if(c.height!==bh)c.height=bh;" +
+                v.style.visibility='hidden';
 
-            "var vw=v.videoWidth;" +
-            "var vh=v.videoHeight;" +
+                var ctx=c.getContext(
+                  '2d',
+                  {alpha:false}
+                );
 
-            "var scale=Math.max(" +
-            "bw/vw,bh/vh);" +
+                function draw(){
+                  if(
+                    v.videoWidth>0 &&
+                    v.videoHeight>0
+                  ){
+                    var cw=
+                      p.clientWidth||1280;
 
-            "var dw=vw*scale;" +
-            "var dh=vh*scale;" +
-            "var dx=(bw-dw)/2;" +
-            "var dy=(bh-dh)/2;" +
+                    var ch=
+                      p.clientHeight||720;
 
-            "try{" +
-            "ctx.imageSmoothingEnabled=true;" +
-            "ctx.imageSmoothingQuality='high';" +
-            "ctx.fillStyle='#000';" +
-            "ctx.fillRect(0,0,bw,bh);" +
-            "ctx.drawImage(v,dx,dy,dw,dh);" +
-            "}catch(e){}" +
-            "}" +
+                    var q=Math.min(
+                      2,
+                      Math.max(
+                        1,
+                        v.videoWidth/cw
+                      )
+                    );
 
-            "requestAnimationFrame(draw);" +
-            "}" +
+                    var bw=
+                      Math.round(cw*q);
 
-            "draw();" +
-            "}" +
+                    var bh=
+                      Math.round(ch*q);
 
-            "start();" +
-            "})();"
+                    if(c.width!==bw)
+                      c.width=bw;
+
+                    if(c.height!==bh)
+                      c.height=bh;
+
+                    var vw=v.videoWidth;
+                    var vh=v.videoHeight;
+
+                    var scale=Math.max(
+                      bw/vw,
+                      bh/vh
+                    );
+
+                    var dw=vw*scale;
+                    var dh=vh*scale;
+
+                    var dx=(bw-dw)/2;
+                    var dy=(bh-dh)/2;
+
+                    try{
+                      ctx.imageSmoothingEnabled=true;
+                      ctx.imageSmoothingQuality='high';
+
+                      ctx.fillStyle='#000';
+
+                      ctx.fillRect(
+                        0,0,bw,bh
+                      );
+
+                      ctx.drawImage(
+                        v,
+                        dx,
+                        dy,
+                        dw,
+                        dh
+                      );
+                    }catch(e){}
+                  }
+
+                  requestAnimationFrame(draw);
+                }
+
+                draw();
+              }
+
+              start();
+            })();
+            """.trimIndent()
 
         view?.evaluateJavascript(js, null)
     }
 
-    private fun startStreamingPipeline() {
+    private fun startPipeline() {
         streamJob?.cancel()
 
         streamJob =
-            CoroutineScope(Dispatchers.IO).launch {
+            CoroutineScope(
+                Dispatchers.IO
+            ).launch {
 
-                drawMessage("콤마4 탐색 중...")
+                drawMessage(
+                    "콤마4 탐색 중..."
+                )
 
-                val ip = findCommaDeviceIp()
+                val ip =
+                    findCommaDeviceIp()
 
                 if (ip == null) {
                     drawMessage(
-                        "콤마4(포트 7000)를 찾지 못함"
+                        "콤마4를 찾지 못함"
                     )
 
                     delay(2000)
 
-                    if (isRendering) {
-                        startStreamingPipeline()
+                    if (rendering) {
+                        startPipeline()
                     }
 
                     return@launch
                 }
 
-                withContext(Dispatchers.Main) {
+                withContext(
+                    Dispatchers.Main
+                ) {
                     layoutWebView()
+
+                    webView?.onResume()
+                    webView?.resumeTimers()
 
                     webView?.loadUrl(
                         "http://$ip:7000"
                     )
                 }
 
-                startRenderLoop()
+                renderLoop()
             }
     }
 
-    private suspend fun startRenderLoop() {
-        while (isRendering) {
+    private suspend fun renderLoop() {
+        while (rendering) {
 
-            withContext(Dispatchers.Main) {
-
-                val c =
-                    surfaceContainer
-                        ?: return@withContext
-
+            withContext(
+                Dispatchers.Main
+            ) {
                 val surface =
-                    c.surface
+                    surfaceContainer
+                        ?.surface
                         ?: return@withContext
 
                 val wv =
@@ -447,35 +588,35 @@ class CarrotMainScreen(carContext: CarContext) :
                 }
 
                 var canvas:
-                    android.graphics.Canvas? = null
+                    android.graphics.Canvas? =
+                    null
 
                 try {
                     canvas =
                         surface.lockCanvas(null)
 
-                    if (canvas != null) {
+                    canvas?.let {
+                        it.drawColor(Color.BLACK)
 
-                        canvas.drawColor(Color.BLACK)
-
-                        renderW = canvas.width
-                        renderH = canvas.height
+                        renderW = it.width
+                        renderH = it.height
 
                         val sx =
-                            renderW /
+                            it.width /
                                 WEB_W.toFloat()
 
                         val sy =
-                            renderH /
+                            it.height /
                                 WEB_H.toFloat()
 
-                        canvas.save()
-                        canvas.scale(sx, sy)
-                        wv.draw(canvas)
-                        canvas.restore()
+                        it.save()
+                        it.scale(sx, sy)
+                        wv.draw(it)
+                        it.restore()
 
                         if (
-                            SystemClock.uptimeMillis() <
-                            touchUntil
+                            SystemClock.uptimeMillis()
+                            < touchUntil
                         ) {
                             val p =
                                 Paint().apply {
@@ -483,21 +624,20 @@ class CarrotMainScreen(carContext: CarContext) :
                                     isAntiAlias = true
                                 }
 
-                            canvas.drawCircle(
+                            it.drawCircle(
                                 touchX,
                                 touchY,
-                                28f,
+                                24f,
                                 p
                             )
                         }
                     }
 
                 } finally {
-                    if (canvas != null) {
+                    canvas?.let {
                         runCatching {
-                            surface.unlockCanvasAndPost(
-                                canvas
-                            )
+                            surface
+                                .unlockCanvasAndPost(it)
                         }
                     }
                 }
@@ -507,9 +647,12 @@ class CarrotMainScreen(carContext: CarContext) :
         }
     }
 
-    private fun drawMessage(message: String) {
-        val c = surfaceContainer ?: return
-        val surface = c.surface ?: return
+    private fun drawMessage(
+        message: String
+    ) {
+        val surface =
+            surfaceContainer?.surface
+                ?: return
 
         if (!surface.isValid) return
 
@@ -517,7 +660,8 @@ class CarrotMainScreen(carContext: CarContext) :
             android.graphics.Canvas? = null
 
         try {
-            canvas = surface.lockCanvas(null)
+            canvas =
+                surface.lockCanvas(null)
 
             canvas?.let {
                 it.drawColor(Color.BLACK)
@@ -540,11 +684,10 @@ class CarrotMainScreen(carContext: CarContext) :
             }
 
         } finally {
-            if (canvas != null) {
+            canvas?.let {
                 runCatching {
-                    surface.unlockCanvasAndPost(
-                        canvas
-                    )
+                    surface
+                        .unlockCanvasAndPost(it)
                 }
             }
         }
@@ -571,11 +714,10 @@ class CarrotMainScreen(carContext: CarContext) :
             ).distinct()
 
         for (subnet in subnets) {
-
             val jobs =
                 (2..254).map { i ->
                     async(Dispatchers.IO) {
-                        val ip = "$subnet.$i"
+                        val ip="$subnet.$i"
 
                         if (
                             isPortOpen(
@@ -663,13 +805,16 @@ class CarrotMainScreen(carContext: CarContext) :
                     timeout
                 )
             }
+
             true
         } catch (_: Exception) {
             false
         }
     }
 
-    override fun onGetTemplate(): Template {
+    override fun onGetTemplate():
+        Template {
+
         return NavigationTemplate.Builder()
             .setMapActionStrip(
                 ActionStrip.Builder()
@@ -682,7 +827,7 @@ class CarrotMainScreen(carContext: CarContext) :
                         Action.Builder()
                             .setTitle("재시도")
                             .setOnClickListener {
-                                startStreamingPipeline()
+                                startPipeline()
                             }
                             .build()
                     )

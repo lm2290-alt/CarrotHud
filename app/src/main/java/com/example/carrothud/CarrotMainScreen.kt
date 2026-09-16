@@ -96,7 +96,8 @@ class CarrotMainScreen(
     override fun onClick(x: Float, y: Float) {
         touchX = x
         touchY = y
-        touchUntil = SystemClock.uptimeMillis() + 700
+        touchUntil =
+            SystemClock.uptimeMillis() + 1200
 
         val wv = webView ?: return
         val sw = surfaceW
@@ -104,8 +105,11 @@ class CarrotMainScreen(
 
         if (sw <= 0 || sh <= 0) return
 
-        val wx = x * WEB_W / sw
-        val wy = y * WEB_H / sh
+        val wx =
+            x * WEB_W.toFloat() / sw.toFloat()
+
+        val wy =
+            y * WEB_H.toFloat() / sh.toFloat()
 
         val js = """
             (function(){
@@ -121,7 +125,12 @@ class CarrotMainScreen(
 
                 if(!t){
                     var p=e.parentElement;
-                    for(var i=0;i<5 && p;i++,p=p.parentElement){
+
+                    for(
+                        var i=0;
+                        i<5 && p;
+                        i++,p=p.parentElement
+                    ){
                         if(
                             p.tagName==='BUTTON' ||
                             p.tagName==='A' ||
@@ -137,7 +146,9 @@ class CarrotMainScreen(
                 if(!t)t=e;
 
                 try{
-                    t.focus({preventScroll:true});
+                    t.focus({
+                        preventScroll:true
+                    });
                 }catch(z){}
 
                 try{
@@ -146,7 +157,9 @@ class CarrotMainScreen(
             })();
         """.trimIndent()
 
-        wv.evaluateJavascript(js, null)
+        wv.post {
+            wv.evaluateJavascript(js, null)
+        }
     }
 
     private fun createWebView() {
@@ -162,10 +175,13 @@ class CarrotMainScreen(
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
-                mediaPlaybackRequiresUserGesture = false
+
+                mediaPlaybackRequiresUserGesture =
+                    false
 
                 useWideViewPort = true
                 loadWithOverviewMode = false
+
                 textZoom = 100
 
                 layoutAlgorithm =
@@ -211,7 +227,12 @@ class CarrotMainScreen(
             )
         )
 
-        wv.layout(0, 0, WEB_W, WEB_H)
+        wv.layout(
+            0,
+            0,
+            WEB_W,
+            WEB_H
+        )
     }
 
     private fun fixPage(view: WebView?) {
@@ -361,6 +382,7 @@ class CarrotMainScreen(
 
                     if(!c){
                         c=document.createElement('canvas');
+
                         c.id='carrotAaVideoMirror';
 
                         c.style.position='absolute';
@@ -379,59 +401,55 @@ class CarrotMainScreen(
 
                     var ctx=c.getContext(
                         '2d',
-                        {
-                            alpha:false,
-                            desynchronized:true
-                        }
+                        {alpha:false}
                     );
 
-                    var busy=false;
+                    function draw(){
+                        if(
+                            v.videoWidth>0 &&
+                            v.videoHeight>0
+                        ){
+                            var cw=p.clientWidth||1280;
+                            var ch=p.clientHeight||720;
 
-                    function drawFrame(){
-                        if(busy)return;
-                        busy=true;
+                            var q=Math.min(
+                                2,
+                                Math.max(
+                                    1,
+                                    v.videoWidth/cw
+                                )
+                            );
 
-                        try{
-                            if(
-                                v.videoWidth>0 &&
-                                v.videoHeight>0
-                            ){
-                                var cw=
-                                    Math.max(
-                                        1,
-                                        Math.round(
-                                            p.clientWidth || 1280
-                                        )
-                                    );
+                            var bw=Math.round(cw*q);
+                            var bh=Math.round(ch*q);
 
-                                var ch=
-                                    Math.max(
-                                        1,
-                                        Math.round(
-                                            p.clientHeight || 720
-                                        )
-                                    );
+                            if(c.width!==bw)c.width=bw;
+                            if(c.height!==bh)c.height=bh;
 
-                                if(c.width!==cw)c.width=cw;
-                                if(c.height!==ch)c.height=ch;
+                            var vw=v.videoWidth;
+                            var vh=v.videoHeight;
 
-                                var vw=v.videoWidth;
-                                var vh=v.videoHeight;
+                            var scale=Math.max(
+                                bw/vw,
+                                bh/vh
+                            );
 
-                                var scale=Math.max(
-                                    cw/vw,
-                                    ch/vh
-                                );
+                            var dw=vw*scale;
+                            var dh=vh*scale;
 
-                                var dw=vw*scale;
-                                var dh=vh*scale;
+                            var dx=(bw-dw)/2;
+                            var dy=(bh-dh)/2;
 
-                                var dx=(cw-dw)/2;
-                                var dy=(ch-dh)/2;
+                            try{
+                                ctx.imageSmoothingEnabled=true;
+                                ctx.imageSmoothingQuality='high';
 
                                 ctx.fillStyle='#000';
                                 ctx.fillRect(
-                                    0,0,cw,ch
+                                    0,
+                                    0,
+                                    bw,
+                                    bh
                                 );
 
                                 ctx.drawImage(
@@ -441,44 +459,13 @@ class CarrotMainScreen(
                                     dw,
                                     dh
                                 );
-                            }
-                        }catch(e){}
-
-                        busy=false;
-                    }
-
-                    if(
-                        typeof v.requestVideoFrameCallback
-                        ==='function'
-                    ){
-                        function next(){
-                            v.requestVideoFrameCallback(
-                                function(){
-                                    drawFrame();
-                                    next();
-                                }
-                            );
+                            }catch(e){}
                         }
 
-                        next();
-                    }else{
-                        var last=0;
-
-                        function fallback(now){
-                            if(now-last>=33){
-                                last=now;
-                                drawFrame();
-                            }
-
-                            requestAnimationFrame(
-                                fallback
-                            );
-                        }
-
-                        requestAnimationFrame(
-                            fallback
-                        );
+                        requestAnimationFrame(draw);
                     }
+
+                    draw();
                 }
 
                 start();
@@ -504,6 +491,7 @@ class CarrotMainScreen(
                     delay(2000)
 
                     if(rendering)start()
+
                     return@launch
                 }
 
@@ -520,11 +508,6 @@ class CarrotMainScreen(
     }
 
     private suspend fun renderLoop() {
-        val paint = Paint().apply {
-            color=Color.RED
-            isAntiAlias=true
-        }
-
         while(rendering){
 
             withContext(Dispatchers.Main){
@@ -537,8 +520,9 @@ class CarrotMainScreen(
                     webView
                         ?:return@withContext
 
-                if(!surface.isValid)
+                if(!surface.isValid){
                     return@withContext
+                }
 
                 var canvas:
                     android.graphics.Canvas?=null
@@ -547,10 +531,10 @@ class CarrotMainScreen(
                     canvas=surface.lockCanvas(null)
 
                     canvas?.let{
+                        it.drawColor(Color.BLACK)
+
                         surfaceW=it.width
                         surfaceH=it.height
-
-                        it.drawColor(Color.BLACK)
 
                         val sx=
                             it.width.toFloat()/WEB_W
@@ -559,18 +543,27 @@ class CarrotMainScreen(
                             it.height.toFloat()/WEB_H
 
                         it.save()
+
                         it.scale(sx,sy)
+
                         wv.draw(it)
+
                         it.restore()
 
                         if(
                             SystemClock.uptimeMillis()
-                            < touchUntil
+                            <touchUntil
                         ){
+                            val paint=
+                                Paint().apply{
+                                    color=Color.RED
+                                    isAntiAlias=true
+                                }
+
                             it.drawCircle(
                                 touchX,
                                 touchY,
-                                24f,
+                                30f,
                                 paint
                             )
                         }
@@ -579,14 +572,14 @@ class CarrotMainScreen(
                 }finally{
                     canvas?.let{
                         runCatching{
-                            surface.unlockCanvasAndPost(it)
+                            surface
+                                .unlockCanvasAndPost(it)
                         }
                     }
                 }
             }
 
-            // 30fps 강제보다 메인 스레드 여유 확보.
-            delay(42)
+            delay(33)
         }
     }
 

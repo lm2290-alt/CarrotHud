@@ -2,6 +2,8 @@ package com.example.carrothud
 
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -28,8 +30,8 @@ class CarrotMainScreen(carContext: CarContext) :
     Screen(carContext), SurfaceCallback {
 
     companion object {
-        private const val WEB_WIDTH = 1280
-        private const val WEB_HEIGHT = 720
+        private const val WEB_W = 1280
+        private const val WEB_H = 720
     }
 
     private var surfaceContainer: SurfaceContainer? = null
@@ -39,9 +41,7 @@ class CarrotMainScreen(carContext: CarContext) :
 
     private var streamJob: Job? = null
     private var webView: WebView? = null
-
     private val renderLock = Any()
-    private var webViewSized = false
 
     init {
         runCatching {
@@ -55,14 +55,12 @@ class CarrotMainScreen(carContext: CarContext) :
                 }
             )
 
-            carContext
-                .getCarService(
-                    androidx.car.app.AppManager::class.java
-                )
-                .setSurfaceCallback(this)
+            carContext.getCarService(
+                androidx.car.app.AppManager::class.java
+            ).setSurfaceCallback(this)
 
         }.onFailure {
-            saveCustomLog("Init: ${it.localizedMessage}")
+            log("Init: ${it.localizedMessage}")
         }
     }
 
@@ -76,7 +74,7 @@ class CarrotMainScreen(carContext: CarContext) :
 
         CoroutineScope(Dispatchers.Main).launch {
             initWebView()
-            sizeWebView()
+            layoutWebView()
             startStreamingPipeline()
         }
     }
@@ -92,61 +90,96 @@ class CarrotMainScreen(carContext: CarContext) :
         }
     }
 
-    override fun onClick(x: Float, y: Float) {
-        val wv = webView ?: return
-        val container = surfaceContainer ?: return
+    /*
+     * Surface 전체를 1280x720으로 변환.
+     * 렌더링과 터치가 동일한 COVER 좌표계를 사용한다.
+     */
+    private fun coverTransform(
+        sw: Int,
+        sh: Int
+    ): FloatArray {
 
-        val sw = container.width
-        val sh = container.height
+        val scale = maxOf(
+            sw / WEB_W.toFloat(),
+            sh / WEB_H.toFloat()
+        )
+
+        val dx =
+            (sw - WEB_W * scale) / 2f
+
+        val dy =
+            (sh - WEB_H * scale) / 2f
+
+        return floatArrayOf(
+            scale,
+            dx,
+            dy
+        )
+    }
+
+    override fun onClick(
+        x: Float,
+        y: Float
+    ) {
+        val wv = webView ?: return
+        val c = surfaceContainer ?: return
+
+        val sw = c.width
+        val sh = c.height
 
         if (sw <= 0 || sh <= 0) return
 
+        val t = coverTransform(sw, sh)
+
+        val scale = t[0]
+        val dx = t[1]
+        val dy = t[2]
+
+        val wx = (x - dx) / scale
+        val wy = (y - dy) / scale
+
+        if (
+            wx < 0f ||
+            wx > WEB_W ||
+            wy < 0f ||
+            wy > WEB_H
+        ) return
+
         wv.post {
-            val scale = minOf(
-                sw / WEB_WIDTH.toFloat(),
-                sh / WEB_HEIGHT.toFloat()
+            /*
+             * JS click이 아니라 WebView에 실제
+             * ACTION_DOWN -> ACTION_UP을 보낸다.
+             */
+            val now = SystemClock.uptimeMillis()
+
+            val down = MotionEvent.obtain(
+                now,
+                now,
+                MotionEvent.ACTION_DOWN,
+                wx,
+                wy,
+                0
             )
 
-            if (scale <= 0f) return@post
+            val up = MotionEvent.obtain(
+                now,
+                now + 60,
+                MotionEvent.ACTION_UP,
+                wx,
+                wy,
+                0
+            )
 
-            val dx =
-                (sw - WEB_WIDTH * scale) / 2f
+            try {
+                wv.dispatchTouchEvent(down)
+                wv.dispatchTouchEvent(up)
 
-            val dy =
-                (sh - WEB_HEIGHT * scale) / 2f
-
-            val webX = (x - dx) / scale
-            val webY = (y - dy) / scale
-
-            if (
-                webX < 0f ||
-                webX > WEB_WIDTH ||
-                webY < 0f ||
-                webY > WEB_HEIGHT
-            ) {
-                return@post
-            }
-
-            val jsX = webX.toInt()
-            val jsY = webY.toInt()
-
-            val script =
-                "(function(){" +
-                "var e=document.elementFromPoint(" +
-                jsX + "," + jsY + ");" +
-                "if(!e)return 'NONE';" +
-                "var t=e.closest(" +
-                "'button,a,input,[role=\"button\"],[onclick]'" +
-                ")||e;" +
-                "t.click();" +
-                "return t.tagName;" +
-                "})();"
-
-            wv.evaluateJavascript(script) { result ->
-                saveCustomLog(
-                    "CLICK x=$x y=$y " +
-                    "web=$webX,$webY result=$result"
+                log(
+                    "TOUCH surface=$x,$y web=$wx,$wy"
                 )
+            } finally {
+                down.recycle()
+                up.recycle()
             }
         }
     }
@@ -161,13 +194,23 @@ class CarrotMainScreen(carContext: CarContext) :
                 null
             )
 
+            isFocusable = true
+            isFocusableInTouchMode = true
+
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
-                mediaPlaybackRequiresUserGesture = false
+
+                mediaPlaybackRequiresUserGesture =
+                    false
 
                 useWideViewPort = true
-                loadWithOverviewMode = true
+
+                /*
+                 * overview 자동 배율을 끈다.
+                 * UI가 커졌다 작아지는 원인 후보 제거.
+                 */
+                loadWithOverviewMode = false
 
                 textZoom = 100
 
@@ -194,34 +237,26 @@ class CarrotMainScreen(carContext: CarContext) :
                             url
                         )
 
-                        applyDisplayFix(view)
+                        fixDisplay(view)
                         autoStartVision(view)
                         installVideoMirror(view)
                     }
                 }
         }
 
-        sizeWebView()
+        layoutWebView()
     }
 
-    private fun sizeWebView() {
+    private fun layoutWebView() {
         val wv = webView ?: return
-
-        if (
-            webViewSized &&
-            wv.width == WEB_WIDTH &&
-            wv.height == WEB_HEIGHT
-        ) {
-            return
-        }
 
         wv.measure(
             View.MeasureSpec.makeMeasureSpec(
-                WEB_WIDTH,
+                WEB_W,
                 View.MeasureSpec.EXACTLY
             ),
             View.MeasureSpec.makeMeasureSpec(
-                WEB_HEIGHT,
+                WEB_H,
                 View.MeasureSpec.EXACTLY
             )
         )
@@ -229,83 +264,109 @@ class CarrotMainScreen(carContext: CarContext) :
         wv.layout(
             0,
             0,
-            WEB_WIDTH,
-            WEB_HEIGHT
+            WEB_W,
+            WEB_H
         )
-
-        webViewSized = true
     }
 
-    private fun applyDisplayFix(
+    /*
+     * 웹페이지 자체의 viewport도 1280x720에 묶는다.
+     */
+    private fun fixDisplay(
         view: WebView?
     ) {
-        val script =
+        val js =
             "(function(){" +
-            "document.documentElement.style." +
-            "webkitTextSizeAdjust='100%';" +
-            "if(document.body)" +
-            "document.body.style." +
-            "webkitTextSizeAdjust='100%';" +
+            "var d=document.documentElement;" +
+            "d.style.webkitTextSizeAdjust='100%';" +
+            "d.style.width='1280px';" +
+            "d.style.height='720px';" +
+            "d.style.margin='0';" +
+            "d.style.overflow='hidden';" +
+
+            "if(document.body){" +
+            "document.body.style.webkitTextSizeAdjust='100%';" +
+            "document.body.style.width='1280px';" +
+            "document.body.style.height='720px';" +
+            "document.body.style.margin='0';" +
+            "document.body.style.overflow='hidden';" +
+            "}" +
+
             "var m=document.querySelector(" +
             "'meta[name=\"viewport\"]');" +
+
             "if(!m){" +
             "m=document.createElement('meta');" +
             "m.name='viewport';" +
             "document.head.appendChild(m);" +
             "}" +
-            "m.content='width=1280," +
-            "initial-scale=1.0," +
-            "maximum-scale=1.0," +
+
+            "m.content=" +
+            "'width=1280,height=720," +
+            "initial-scale=1," +
+            "minimum-scale=1," +
+            "maximum-scale=1," +
             "user-scalable=no';" +
-            "return 'OK';" +
+
+            "window.scrollTo(0,0);" +
             "})();"
 
-        view?.evaluateJavascript(script) {
-            result ->
-            saveCustomLog(
-                "DisplayFix=$result"
-            )
-        }
+        view?.evaluateJavascript(
+            js,
+            null
+        )
     }
 
     private fun autoStartVision(
         view: WebView?
     ) {
-        val script =
+        val js =
             "(function(){" +
             "var n=0;" +
-            "var timer=setInterval(function(){" +
+
+            "var z=setInterval(function(){" +
             "n++;" +
+
             "var a=document.getElementsByTagName('*');" +
+
             "for(var i=0;i<a.length;i++){" +
             "var e=a[i];" +
             "var t=(e.innerText||" +
             "e.textContent||'').trim();" +
-            "if(t.indexOf('당근 비전 시작')" +
-            "!==-1||" +
-            "t.indexOf('비전 시작')!==-1){" +
+
+            "if(" +
+            "t.indexOf('당근 비전 시작')!==-1||" +
+            "t.indexOf('비전 시작')!==-1" +
+            "){" +
             "e.click();" +
             "}" +
             "}" +
-            "if(n>20)clearInterval(timer);" +
+
+            "if(n>20)clearInterval(z);" +
             "},500);" +
             "})();"
 
         view?.evaluateJavascript(
-            script,
+            js,
             null
         )
     }
 
+    /*
+     * 성공했던 카메라 미러 방식 유지.
+     * WebRTC video -> Canvas2D
+     */
     private fun installVideoMirror(
         view: WebView?
     ) {
-        val script =
+        val js =
             "(function(){" +
+
             "if(window.__carrotAaMirror)return;" +
             "window.__carrotAaMirror=true;" +
 
             "function start(){" +
+
             "var v=document.getElementById(" +
             "'carrotRoadVideo');" +
 
@@ -314,17 +375,18 @@ class CarrotMainScreen(carContext: CarContext) :
             "return;" +
             "}" +
 
-            "var old=document.getElementById(" +
-            "'carrotAaVideoMirror');" +
-            "if(old)return;" +
+            "if(document.getElementById(" +
+            "'carrotAaVideoMirror'))return;" +
 
             "var p=v.parentElement;" +
+
             "if(!p){" +
             "setTimeout(start,500);" +
             "return;" +
             "}" +
 
             "var c=document.createElement('canvas');" +
+
             "c.id='carrotAaVideoMirror';" +
 
             "c.style.position='absolute';" +
@@ -344,8 +406,8 @@ class CarrotMainScreen(carContext: CarContext) :
             "'2d',{alpha:false});" +
 
             "function draw(){" +
-            "if(v.videoWidth>0&&" +
-            "v.videoHeight>0){" +
+
+            "if(v.videoWidth>0&&v.videoHeight>0){" +
 
             "var cw=p.clientWidth||1280;" +
             "var ch=p.clientHeight||720;" +
@@ -361,14 +423,14 @@ class CarrotMainScreen(carContext: CarContext) :
 
             "var dw=vw*s;" +
             "var dh=vh*s;" +
+
             "var dx=(cw-dw)/2;" +
             "var dy=(ch-dh)/2;" +
 
             "try{" +
             "ctx.fillStyle='#000';" +
             "ctx.fillRect(0,0,cw,ch);" +
-            "ctx.drawImage(" +
-            "v,dx,dy,dw,dh);" +
+            "ctx.drawImage(v,dx,dy,dw,dh);" +
             "}catch(e){}" +
             "}" +
 
@@ -382,7 +444,7 @@ class CarrotMainScreen(carContext: CarContext) :
             "})();"
 
         view?.evaluateJavascript(
-            script,
+            js,
             null
         )
     }
@@ -399,10 +461,11 @@ class CarrotMainScreen(carContext: CarContext) :
                     "콤마4 탐색 중..."
                 )
 
-                val commaIp =
+                val ip =
                     findCommaDeviceIp()
 
-                if (commaIp == null) {
+                if (ip == null) {
+
                     drawMessage(
                         "콤마4(포트 7000)를 찾지 못함"
                     )
@@ -416,40 +479,40 @@ class CarrotMainScreen(carContext: CarContext) :
                     return@launch
                 }
 
-                saveCustomLog(
-                    "Comma=$commaIp"
-                )
+                log("Comma=$ip")
 
                 drawMessage(
                     "영상 스트리밍 연결 중..."
                 )
 
-                val url =
-                    "http://$commaIp:7000"
-
                 withContext(
                     Dispatchers.Main
                 ) {
-                    sizeWebView()
-                    webView?.loadUrl(url)
+                    layoutWebView()
+
+                    webView?.loadUrl(
+                        "http://$ip:7000"
+                    )
                 }
 
-                startSurfaceRenderLoop()
+                startRenderLoop()
             }
     }
 
-    private suspend fun startSurfaceRenderLoop() {
+    private suspend fun startRenderLoop() {
+
         while (isRendering) {
 
             withContext(
                 Dispatchers.Main
             ) {
-                val container =
+
+                val c =
                     surfaceContainer
                         ?: return@withContext
 
                 val surface =
-                    container.surface
+                    c.surface
                         ?: return@withContext
 
                 val wv =
@@ -459,55 +522,48 @@ class CarrotMainScreen(carContext: CarContext) :
                 if (
                     !surface.isValid ||
                     !isRendering
-                ) {
-                    return@withContext
-                }
+                ) return@withContext
 
-                sizeWebView()
+                /*
+                 * 페이지의 실제 layout은
+                 * 매 프레임 1280x720으로 유지.
+                 */
+                layoutWebView()
 
                 var canvas:
-                    android.graphics.Canvas? =
-                    null
+                    android.graphics.Canvas? = null
 
                 try {
                     canvas =
                         surface.lockCanvas(null)
 
                     if (canvas != null) {
+
                         canvas.drawColor(
                             Color.BLACK
                         )
 
-                        val scale =
-                            minOf(
-                                canvas.width /
-                                    WEB_WIDTH.toFloat(),
-                                canvas.height /
-                                    WEB_HEIGHT.toFloat()
+                        /*
+                         * minOf가 아니라 maxOf.
+                         * 화면 비율을 유지하면서
+                         * Surface를 빈틈없이 채운다.
+                         */
+                        val t =
+                            coverTransform(
+                                canvas.width,
+                                canvas.height
                             )
-
-                        val dx =
-                            (
-                                canvas.width -
-                                WEB_WIDTH * scale
-                            ) / 2f
-
-                        val dy =
-                            (
-                                canvas.height -
-                                WEB_HEIGHT * scale
-                            ) / 2f
 
                         canvas.save()
 
                         canvas.translate(
-                            dx,
-                            dy
+                            t[1],
+                            t[2]
                         )
 
                         canvas.scale(
-                            scale,
-                            scale
+                            t[0],
+                            t[0]
                         )
 
                         wv.draw(canvas)
@@ -515,13 +571,15 @@ class CarrotMainScreen(carContext: CarContext) :
                         canvas.restore()
                     }
 
-                } catch (t: Throwable) {
-                    saveCustomLog(
+                } catch (e: Throwable) {
+
+                    log(
                         "Render: " +
-                        t.localizedMessage
+                        e.localizedMessage
                     )
 
                 } finally {
+
                     if (canvas != null) {
                         runCatching {
                             surface
@@ -542,11 +600,11 @@ class CarrotMainScreen(carContext: CarContext) :
     ) {
         synchronized(renderLock) {
 
-            val container =
+            val c =
                 surfaceContainer ?: return
 
             val surface =
-                container.surface ?: return
+                c.surface ?: return
 
             if (
                 !surface.isValid ||
@@ -554,8 +612,7 @@ class CarrotMainScreen(carContext: CarContext) :
             ) return
 
             var canvas:
-                android.graphics.Canvas? =
-                null
+                android.graphics.Canvas? = null
 
             try {
                 canvas =
@@ -563,32 +620,13 @@ class CarrotMainScreen(carContext: CarContext) :
 
                 if (canvas != null) {
 
-                    val width =
-                        if (
-                            container.width > 0
-                        ) {
-                            container.width
-                        } else {
-                            canvas.width
-                        }
-
-                    val height =
-                        if (
-                            container.height > 0
-                        ) {
-                            container.height
-                        } else {
-                            canvas.height
-                        }
-
                     canvas.drawColor(
                         Color.BLACK
                     )
 
                     val paint =
                         Paint().apply {
-                            color =
-                                Color.WHITE
+                            color = Color.WHITE
                             textSize = 32f
                             textAlign =
                                 Paint.Align.CENTER
@@ -597,19 +635,21 @@ class CarrotMainScreen(carContext: CarContext) :
 
                     canvas.drawText(
                         message,
-                        width / 2f,
-                        height / 2f,
+                        canvas.width / 2f,
+                        canvas.height / 2f,
                         paint
                     )
                 }
 
-            } catch (t: Throwable) {
-                saveCustomLog(
+            } catch (e: Throwable) {
+
+                log(
                     "Message: " +
-                    t.localizedMessage
+                    e.localizedMessage
                 )
 
             } finally {
+
                 if (canvas != null) {
                     runCatching {
                         surface
@@ -622,19 +662,15 @@ class CarrotMainScreen(carContext: CarContext) :
         }
     }
 
-    private fun saveCustomLog(
+    private fun log(
         msg: String
     ) {
         runCatching {
-            val file =
-                File(
-                    carContext.filesDir,
-                    "carrot_crash.txt"
-                )
-
-            file.appendText(
-                "${java.util.Date()}: " +
-                "$msg\n"
+            File(
+                carContext.filesDir,
+                "carrot_crash.txt"
+            ).appendText(
+                "${java.util.Date()}: $msg\n"
             )
         }
     }
@@ -643,10 +679,11 @@ class CarrotMainScreen(carContext: CarContext) :
         String? =
         coroutineScope {
 
-            val candidateSubnets =
+            val subnets =
                 (
                     getLocalSubnets() +
                     listOf(
+                        "10.142.142",
                         "192.168.43",
                         "192.168.42",
                         "192.168.137",
@@ -655,20 +692,19 @@ class CarrotMainScreen(carContext: CarContext) :
                         "10.42.0",
                         "192.168.0",
                         "192.168.1",
-                        "192.168.8",
-                        "10.142.142"
+                        "192.168.8"
                     )
                 ).distinct()
 
-            for (
-                subnet in candidateSubnets
-            ) {
+            for (subnet in subnets) {
+
                 val tasks =
                     (2..254).map { i ->
 
                         async(
                             Dispatchers.IO
                         ) {
+
                             val ip =
                                 "$subnet.$i"
 
@@ -678,17 +714,13 @@ class CarrotMainScreen(carContext: CarContext) :
                                     7000,
                                     250
                                 )
-                            ) {
-                                ip
-                            } else {
-                                null
-                            }
+                            ) ip
+                            else null
                         }
                     }
 
                 val found =
-                    tasks
-                        .awaitAll()
+                    tasks.awaitAll()
                         .firstOrNull {
                             it != null
                         }
@@ -714,23 +746,20 @@ class CarrotMainScreen(carContext: CarContext) :
                         .getNetworkInterfaces()
                 )
 
-            for (
-                networkInterface in interfaces
-            ) {
+            for (network in interfaces) {
+
                 val addresses =
                     Collections.list(
-                        networkInterface
-                            .inetAddresses
+                        network.inetAddresses
                     )
 
-                for (
-                    address in addresses
-                ) {
+                for (address in addresses) {
+
                     if (
-                        !address
-                            .isLoopbackAddress &&
+                        !address.isLoopbackAddress &&
                         address is Inet4Address
                     ) {
+
                         val host =
                             address.hostAddress
                                 ?: continue
@@ -751,7 +780,7 @@ class CarrotMainScreen(carContext: CarContext) :
             }
 
         } catch (e: Exception) {
-            saveCustomLog(
+            log(
                 "Subnet: " +
                 e.localizedMessage
             )
@@ -763,23 +792,24 @@ class CarrotMainScreen(carContext: CarContext) :
     private fun isPortOpen(
         ip: String,
         port: Int,
-        timeoutMs: Int
+        timeout: Int
     ): Boolean {
 
         return try {
-            Socket().use { socket ->
-                socket.connect(
+
+            Socket().use {
+                it.connect(
                     InetSocketAddress(
                         ip,
                         port
                     ),
-                    timeoutMs
+                    timeout
                 )
             }
 
             true
 
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
@@ -793,11 +823,8 @@ class CarrotMainScreen(carContext: CarContext) :
                 ActionStrip
                     .Builder()
                     .addAction(
-                        Action
-                            .Builder()
-                            .setTitle(
-                                "재시도"
-                            )
+                        Action.Builder()
+                            .setTitle("재시도")
                             .setOnClickListener {
                                 startStreamingPipeline()
                             }

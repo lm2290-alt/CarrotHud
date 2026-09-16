@@ -98,16 +98,9 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             val bos = ByteArrayOutputStream()
 
             while (isRendering) {
-                val available = inputStream.available()
-                val chunk = if (available > 0) {
-                    val b = ByteArray(minOf(available, buffer.size))
-                    inputStream.read(b)
-                } else {
-                    inputStream.read(buffer)
-                }
-
-                if (chunk == -1) break
-                bos.write(buffer, 0, chunk)
+                val bytesRead = inputStream.read(buffer)
+                if (bytesRead == -1) break
+                bos.write(buffer, 0, bytesRead)
 
                 val bytes = bos.toByteArray()
                 var startIndex = -1
@@ -146,12 +139,11 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     if (endIndex < bytes.size) {
                         bos.write(bytes, endIndex, bytes.size - endIndex)
                     }
-                } else if (bytes.size > 1024 * 1024) {
+                } else if (bytes.size > 2 * 1024 * 1024) {
                     bos.reset()
                 }
 
                 renderFrame()
-                delay(10)
             }
         } catch (e: Exception) {
             updateMessage("스트리밍 끊김: ${e.localizedMessage}\n재연결 중...")
@@ -267,7 +259,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
     override fun onGetTemplate(): Template {
         return NavigationTemplate.Builder()
-            .setRoutingInfo(
+            .setNavigationInfo(
                 RoutingInfo.Builder()
                     .setLoading(false)
                     .build()

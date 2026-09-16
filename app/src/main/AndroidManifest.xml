@@ -10,8 +10,10 @@
     <application
         android:allowBackup="true"
         android:label="당근HUD"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true">
 
+        <!-- 안드로이드 오토 인식 메타데이터 -->
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />

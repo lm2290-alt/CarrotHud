@@ -13,6 +13,7 @@ import androidx.car.app.model.*
 import androidx.car.app.navigation.NavigationManager
 import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
+import androidx.car.app.navigation.model.RoutingInfo
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -266,6 +267,11 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
     override fun onGetTemplate(): Template {
         return NavigationTemplate.Builder()
+            .setRoutingInfo(
+                RoutingInfo.Builder()
+                    .setLoading(false)
+                    .build()
+            )
             .setActionStrip(
                 ActionStrip.Builder()
                     .addAction(

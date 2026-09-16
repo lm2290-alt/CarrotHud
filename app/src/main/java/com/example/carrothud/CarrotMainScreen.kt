@@ -96,21 +96,16 @@ class CarrotMainScreen(
     override fun onClick(x: Float, y: Float) {
         touchX = x
         touchY = y
-        touchUntil =
-            SystemClock.uptimeMillis() + 1200
+        touchUntil = SystemClock.uptimeMillis() + 700
 
         val wv = webView ?: return
-
         val sw = surfaceW
         val sh = surfaceH
 
         if (sw <= 0 || sh <= 0) return
 
-        val wx =
-            x * WEB_W.toFloat() / sw.toFloat()
-
-        val wy =
-            y * WEB_H.toFloat() / sh.toFloat()
+        val wx = x * WEB_W / sw
+        val wy = y * WEB_H / sh
 
         val js = """
             (function(){
@@ -121,82 +116,37 @@ class CarrotMainScreen(
                 if(!e)return;
 
                 var t=e.closest(
-                    'button,a,input,label,[role="button"],[onclick]'
-                ) || e;
+                    'button,a,[role="button"],input,label,[onclick]'
+                );
 
-                try {
-                    var p=new PointerEvent(
-                        'pointerdown',
-                        {
-                            bubbles:true,
-                            cancelable:true,
-                            clientX:x,
-                            clientY:y,
-                            pointerId:1,
-                            pointerType:'touch',
-                            isPrimary:true,
-                            buttons:1
+                if(!t){
+                    var p=e.parentElement;
+                    for(var i=0;i<5 && p;i++,p=p.parentElement){
+                        if(
+                            p.tagName==='BUTTON' ||
+                            p.tagName==='A' ||
+                            p.getAttribute('role')==='button' ||
+                            typeof p.onclick==='function'
+                        ){
+                            t=p;
+                            break;
                         }
-                    );
-                    t.dispatchEvent(p);
-                } catch(z) {}
+                    }
+                }
 
-                try {
-                    t.dispatchEvent(
-                        new MouseEvent(
-                            'mousedown',
-                            {
-                                bubbles:true,
-                                cancelable:true,
-                                clientX:x,
-                                clientY:y,
-                                buttons:1
-                            }
-                        )
-                    );
-                } catch(z) {}
+                if(!t)t=e;
 
-                try {
-                    t.dispatchEvent(
-                        new PointerEvent(
-                            'pointerup',
-                            {
-                                bubbles:true,
-                                cancelable:true,
-                                clientX:x,
-                                clientY:y,
-                                pointerId:1,
-                                pointerType:'touch',
-                                isPrimary:true,
-                                buttons:0
-                            }
-                        )
-                    );
-                } catch(z) {}
+                try{
+                    t.focus({preventScroll:true});
+                }catch(z){}
 
-                try {
-                    t.dispatchEvent(
-                        new MouseEvent(
-                            'mouseup',
-                            {
-                                bubbles:true,
-                                cancelable:true,
-                                clientX:x,
-                                clientY:y
-                            }
-                        )
-                    );
-                } catch(z) {}
-
-                try {
+                try{
                     t.click();
-                } catch(z) {}
+                }catch(z){}
             })();
         """.trimIndent()
 
-        wv.post {
-            wv.evaluateJavascript(js, null)
-        }
+        wv.evaluateJavascript(js, null)
     }
 
     private fun createWebView() {
@@ -212,13 +162,10 @@ class CarrotMainScreen(
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
-
-                mediaPlaybackRequiresUserGesture =
-                    false
+                mediaPlaybackRequiresUserGesture = false
 
                 useWideViewPort = true
                 loadWithOverviewMode = false
-
                 textZoom = 100
 
                 layoutAlgorithm =
@@ -229,13 +176,11 @@ class CarrotMainScreen(
                 displayZoomControls = false
 
                 mixedContentMode =
-                    WebSettings
-                        .MIXED_CONTENT_ALWAYS_ALLOW
+                    WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             }
 
             webViewClient =
                 object : WebViewClient() {
-
                     override fun onPageFinished(
                         view: WebView?,
                         url: String?
@@ -266,12 +211,7 @@ class CarrotMainScreen(
             )
         )
 
-        wv.layout(
-            0,
-            0,
-            WEB_W,
-            WEB_H
-        )
+        wv.layout(0, 0, WEB_W, WEB_H)
     }
 
     private fun fixPage(view: WebView?) {
@@ -324,7 +264,6 @@ class CarrotMainScreen(
                 `;
 
                 document.head.appendChild(s);
-
                 window.scrollTo(0,0);
             })();
         """.trimIndent()
@@ -422,7 +361,6 @@ class CarrotMainScreen(
 
                     if(!c){
                         c=document.createElement('canvas');
-
                         c.id='carrotAaVideoMirror';
 
                         c.style.position='absolute';
@@ -441,51 +379,60 @@ class CarrotMainScreen(
 
                     var ctx=c.getContext(
                         '2d',
-                        {alpha:false}
+                        {
+                            alpha:false,
+                            desynchronized:true
+                        }
                     );
 
-                    function draw(){
-                        if(
-                            v.videoWidth>0 &&
-                            v.videoHeight>0
-                        ){
-                            var cw=p.clientWidth||1280;
-                            var ch=p.clientHeight||720;
+                    var busy=false;
 
-                            var q=Math.min(
-                                2,
-                                Math.max(
-                                    1,
-                                    v.videoWidth/cw
-                                )
-                            );
+                    function drawFrame(){
+                        if(busy)return;
+                        busy=true;
 
-                            var bw=Math.round(cw*q);
-                            var bh=Math.round(ch*q);
+                        try{
+                            if(
+                                v.videoWidth>0 &&
+                                v.videoHeight>0
+                            ){
+                                var cw=
+                                    Math.max(
+                                        1,
+                                        Math.round(
+                                            p.clientWidth || 1280
+                                        )
+                                    );
 
-                            if(c.width!==bw)c.width=bw;
-                            if(c.height!==bh)c.height=bh;
+                                var ch=
+                                    Math.max(
+                                        1,
+                                        Math.round(
+                                            p.clientHeight || 720
+                                        )
+                                    );
 
-                            var vw=v.videoWidth;
-                            var vh=v.videoHeight;
+                                if(c.width!==cw)c.width=cw;
+                                if(c.height!==ch)c.height=ch;
 
-                            var scale=Math.max(
-                                bw/vw,
-                                bh/vh
-                            );
+                                var vw=v.videoWidth;
+                                var vh=v.videoHeight;
 
-                            var dw=vw*scale;
-                            var dh=vh*scale;
+                                var scale=Math.max(
+                                    cw/vw,
+                                    ch/vh
+                                );
 
-                            var dx=(bw-dw)/2;
-                            var dy=(bh-dh)/2;
+                                var dw=vw*scale;
+                                var dh=vh*scale;
 
-                            try {
-                                ctx.imageSmoothingEnabled=true;
-                                ctx.imageSmoothingQuality='high';
+                                var dx=(cw-dw)/2;
+                                var dy=(ch-dh)/2;
 
                                 ctx.fillStyle='#000';
-                                ctx.fillRect(0,0,bw,bh);
+                                ctx.fillRect(
+                                    0,0,cw,ch
+                                );
 
                                 ctx.drawImage(
                                     v,
@@ -494,13 +441,44 @@ class CarrotMainScreen(
                                     dw,
                                     dh
                                 );
-                            } catch(e) {}
-                        }
+                            }
+                        }catch(e){}
 
-                        requestAnimationFrame(draw);
+                        busy=false;
                     }
 
-                    draw();
+                    if(
+                        typeof v.requestVideoFrameCallback
+                        ==='function'
+                    ){
+                        function next(){
+                            v.requestVideoFrameCallback(
+                                function(){
+                                    drawFrame();
+                                    next();
+                                }
+                            );
+                        }
+
+                        next();
+                    }else{
+                        var last=0;
+
+                        function fallback(now){
+                            if(now-last>=33){
+                                last=now;
+                                drawFrame();
+                            }
+
+                            requestAnimationFrame(
+                                fallback
+                            );
+                        }
+
+                        requestAnimationFrame(
+                            fallback
+                        );
+                    }
                 }
 
                 start();
@@ -526,7 +504,6 @@ class CarrotMainScreen(
                     delay(2000)
 
                     if(rendering)start()
-
                     return@launch
                 }
 
@@ -543,6 +520,11 @@ class CarrotMainScreen(
     }
 
     private suspend fun renderLoop() {
+        val paint = Paint().apply {
+            color=Color.RED
+            isAntiAlias=true
+        }
+
         while(rendering){
 
             withContext(Dispatchers.Main){
@@ -555,9 +537,8 @@ class CarrotMainScreen(
                     webView
                         ?:return@withContext
 
-                if(!surface.isValid){
+                if(!surface.isValid)
                     return@withContext
-                }
 
                 var canvas:
                     android.graphics.Canvas?=null
@@ -566,10 +547,10 @@ class CarrotMainScreen(
                     canvas=surface.lockCanvas(null)
 
                     canvas?.let{
-                        it.drawColor(Color.BLACK)
-
                         surfaceW=it.width
                         surfaceH=it.height
+
+                        it.drawColor(Color.BLACK)
 
                         val sx=
                             it.width.toFloat()/WEB_W
@@ -578,27 +559,18 @@ class CarrotMainScreen(
                             it.height.toFloat()/WEB_H
 
                         it.save()
-
                         it.scale(sx,sy)
-
                         wv.draw(it)
-
                         it.restore()
 
                         if(
                             SystemClock.uptimeMillis()
-                            <touchUntil
+                            < touchUntil
                         ){
-                            val paint=
-                                Paint().apply{
-                                    color=Color.RED
-                                    isAntiAlias=true
-                                }
-
                             it.drawCircle(
                                 touchX,
                                 touchY,
-                                30f,
+                                24f,
                                 paint
                             )
                         }
@@ -607,14 +579,14 @@ class CarrotMainScreen(
                 }finally{
                     canvas?.let{
                         runCatching{
-                            surface
-                                .unlockCanvasAndPost(it)
+                            surface.unlockCanvasAndPost(it)
                         }
                     }
                 }
             }
 
-            delay(33)
+            // 30fps 강제보다 메인 스레드 여유 확보.
+            delay(42)
         }
     }
 

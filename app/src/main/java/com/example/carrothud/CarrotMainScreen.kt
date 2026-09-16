@@ -31,6 +31,10 @@ class CarrotMainScreen(
     companion object {
         private const val WEB_W = 1280
         private const val WEB_H = 720
+
+        // AA 화면 갱신은 20fps.
+        // WebView/JS/비디오 메인스레드 여유 확보.
+        private const val RENDER_DELAY = 50L
     }
 
     private var container: SurfaceContainer? = null
@@ -85,113 +89,181 @@ class CarrotMainScreen(
 
     override fun onClick(x: Float, y: Float) {
         val wv = webView ?: return
+
         val sw = surfaceW
         val sh = surfaceH
 
         if (sw <= 0 || sh <= 0) return
 
         val wx =
-            x * WEB_W.toFloat() / sw.toFloat()
+            x * WEB_W.toFloat() /
+            sw.toFloat()
 
         val wy =
-            y * WEB_H.toFloat() / sh.toFloat()
+            y * WEB_H.toFloat() /
+            sh.toFloat()
 
         val js = """
             (function(){
-                var x=${wx.toInt()};
-                var y=${wy.toInt()};
+                const x=${wx.toInt()};
+                const y=${wy.toInt()};
 
-                var e=document.elementFromPoint(x,y);
-                if(!e)return;
+                function clickable(e){
+                    if(!e)return null;
 
-                var t=e.closest(
-                    'button,a,[role="button"],input,label,[onclick]'
-                );
-
-                if(!t){
-                    var p=e.parentElement;
-
-                    for(
-                        var i=0;
-                        i<5 && p;
-                        i++,p=p.parentElement
-                    ){
-                        if(
-                            p.tagName==='BUTTON' ||
-                            p.tagName==='A' ||
-                            p.getAttribute('role')==='button' ||
-                            typeof p.onclick==='function'
-                        ){
-                            t=p;
-                            break;
-                        }
-                    }
+                    return e.closest(
+                        'button,'+
+                        'a,'+
+                        'input,'+
+                        'label,'+
+                        '[role="button"],'+
+                        '[onclick],'+
+                        '[tabindex]'
+                    );
                 }
 
-                if(!t)t=e;
+                let target=
+                    clickable(
+                        document.elementFromPoint(x,y)
+                    );
+
+                if(!target){
+                    const all=
+                        document.querySelectorAll(
+                            'button,'+
+                            'a,'+
+                            'input,'+
+                            'label,'+
+                            '[role="button"],'+
+                            '[onclick],'+
+                            '[tabindex]'
+                        );
+
+                    let best=null;
+                    let bestDist=80;
+
+                    for(const el of all){
+                        const r=
+                            el.getBoundingClientRect();
+
+                        if(
+                            r.width<=0 ||
+                            r.height<=0
+                        )continue;
+
+                        const cx=
+                            Math.max(
+                                r.left,
+                                Math.min(x,r.right)
+                            );
+
+                        const cy=
+                            Math.max(
+                                r.top,
+                                Math.min(y,r.bottom)
+                            );
+
+                        const dx=x-cx;
+                        const dy=y-cy;
+
+                        const d=
+                            Math.sqrt(
+                                dx*dx+dy*dy
+                            );
+
+                        if(d<bestDist){
+                            bestDist=d;
+                            best=el;
+                        }
+                    }
+
+                    target=best;
+                }
+
+                if(!target)return;
 
                 try{
-                    t.focus({preventScroll:true});
-                }catch(z){}
+                    target.focus({
+                        preventScroll:true
+                    });
+                }catch(e){}
 
                 try{
-                    t.click();
-                }catch(z){}
+                    target.click();
+                }catch(e){}
             })();
         """.trimIndent()
 
+        // 이전 테스트에서 실제 터치가 됐던 방식.
         wv.evaluateJavascript(js, null)
     }
 
     private fun createWebView() {
         if (webView != null) return
 
-        webView = WebView(carContext).apply {
+        webView =
+            WebView(carContext).apply {
 
-            setLayerType(
-                View.LAYER_TYPE_HARDWARE,
-                null
-            )
+                setLayerType(
+                    View.LAYER_TYPE_HARDWARE,
+                    null
+                )
 
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                mediaPlaybackRequiresUserGesture = false
-                useWideViewPort = true
-                loadWithOverviewMode = false
-                textZoom = 100
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
 
-                layoutAlgorithm =
-                    WebSettings.LayoutAlgorithm.NORMAL
+                    mediaPlaybackRequiresUserGesture =
+                        false
 
-                setSupportZoom(false)
-                builtInZoomControls = false
-                displayZoomControls = false
+                    useWideViewPort = true
+                    loadWithOverviewMode = false
 
-                mixedContentMode =
-                    WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            }
+                    textZoom = 100
 
-            webViewClient =
-                object : WebViewClient() {
-                    override fun onPageFinished(
-                        view: WebView?,
-                        url: String?
-                    ) {
-                        super.onPageFinished(view, url)
+                    layoutAlgorithm =
+                        WebSettings
+                            .LayoutAlgorithm
+                            .NORMAL
 
-                        fixPage(view)
-                        restoreAutoStart(view)
-                        installMirror(view)
-                    }
+                    setSupportZoom(false)
+
+                    builtInZoomControls =
+                        false
+
+                    displayZoomControls =
+                        false
+
+                    mixedContentMode =
+                        WebSettings
+                            .MIXED_CONTENT_ALWAYS_ALLOW
                 }
-        }
+
+                webViewClient =
+                    object : WebViewClient() {
+
+                        override fun onPageFinished(
+                            view: WebView?,
+                            url: String?
+                        ) {
+                            super.onPageFinished(
+                                view,
+                                url
+                            )
+
+                            fixPage(view)
+                            restoreAutoStart(view)
+                            installMirror(view)
+                        }
+                    }
+            }
 
         measureWebView()
     }
 
     private fun measureWebView() {
-        val wv = webView ?: return
+        val wv =
+            webView ?: return
 
         wv.measure(
             View.MeasureSpec.makeMeasureSpec(
@@ -212,81 +284,126 @@ class CarrotMainScreen(
         )
     }
 
-    private fun fixPage(view: WebView?) {
+    private fun fixPage(
+        view: WebView?
+    ) {
         val js = """
             (function(){
-                var meta=document.querySelector(
-                    'meta[name="viewport"]'
-                );
+                let meta=
+                    document.querySelector(
+                        'meta[name="viewport"]'
+                    );
 
                 if(!meta){
-                    meta=document.createElement('meta');
+                    meta=
+                        document.createElement(
+                            'meta'
+                        );
+
                     meta.name='viewport';
-                    document.head.appendChild(meta);
+
+                    document.head.appendChild(
+                        meta
+                    );
                 }
 
                 meta.content=
-                    'width=1280,height=720,'+
+                    'width=1280,'+
+                    'height=720,'+
                     'initial-scale=1,'+
+                    'minimum-scale=1,'+
                     'maximum-scale=1,'+
                     'user-scalable=no';
 
-                var old=document.getElementById(
-                    'carrotHudFixedStyle'
-                );
+                let old=
+                    document.getElementById(
+                        'carrotHudFixedStyle'
+                    );
 
                 if(old)old.remove();
 
-                var s=document.createElement('style');
-                s.id='carrotHudFixedStyle';
+                let s=
+                    document.createElement(
+                        'style'
+                    );
+
+                s.id=
+                    'carrotHudFixedStyle';
 
                 s.textContent=`
-                    html,body{
+                    html,
+                    body{
                         width:1280px !important;
                         height:720px !important;
+
                         min-width:1280px !important;
                         max-width:1280px !important;
+
                         min-height:720px !important;
                         max-height:720px !important;
+
                         margin:0 !important;
                         padding:0 !important;
+
                         overflow:hidden !important;
-                        -webkit-text-size-adjust:100% !important;
+
+                        transform:none !important;
+
+                        -webkit-text-size-adjust:
+                            100% !important;
                     }
 
                     #carrotStage,
                     .carrot-stage{
                         transition:none !important;
-                        animation:none !important;
                     }
                 `;
 
                 document.head.appendChild(s);
+
                 window.scrollTo(0,0);
             })();
         """.trimIndent()
 
-        view?.evaluateJavascript(js, null)
+        view?.evaluateJavascript(
+            js,
+            null
+        )
     }
 
-    private fun restoreAutoStart(view: WebView?) {
+    private fun restoreAutoStart(
+        view: WebView?
+    ) {
         val js = """
             (function(){
-                if(window.__carrotHudAutoStart)return;
-                window.__carrotHudAutoStart=true;
+                if(
+                    window.__carrotHudAutoStart
+                )return;
 
-                var attempts=0;
+                window.__carrotHudAutoStart=
+                    true;
 
-                var timer=setInterval(function(){
+                let attempts=0;
+
+                const timer=
+                    setInterval(function(){
+
                     attempts++;
 
-                    var all=
-                        document.getElementsByTagName('*');
+                    const all=
+                        document
+                        .getElementsByTagName(
+                            '*'
+                        );
 
-                    for(var i=0;i<all.length;i++){
-                        var el=all[i];
+                    for(
+                        let i=0;
+                        i<all.length;
+                        i++
+                    ){
+                        const el=all[i];
 
-                        var txt=(
+                        const txt=(
                             el.innerText ||
                             el.textContent ||
                             ''
@@ -300,12 +417,18 @@ class CarrotMainScreen(
                                 '비전 시작'
                             )!==-1
                         ){
-                            var button=
-                                el.closest('button');
+                            const button=
+                                el.closest(
+                                    'button'
+                                );
 
                             if(button){
                                 button.click();
-                                clearInterval(timer);
+
+                                clearInterval(
+                                    timer
+                                );
+
                                 return;
                             }
 
@@ -315,14 +438,18 @@ class CarrotMainScreen(
                                     'vision-start-overlay'
                                 )
                             ){
-                                var b=
+                                const b=
                                     el.querySelector(
                                         'button'
                                     );
 
                                 if(b){
                                     b.click();
-                                    clearInterval(timer);
+
+                                    clearInterval(
+                                        timer
+                                    );
+
                                     return;
                                 }
                             }
@@ -332,127 +459,164 @@ class CarrotMainScreen(
                     if(attempts>=20){
                         clearInterval(timer);
                     }
+
                 },500);
             })();
         """.trimIndent()
 
-        view?.evaluateJavascript(js, null)
+        view?.evaluateJavascript(
+            js,
+            null
+        )
     }
 
-    private fun installMirror(view: WebView?) {
+    private fun installMirror(
+        view: WebView?
+    ) {
         val js = """
             (function(){
-                if(window.__carrotAaMirror)return;
+                if(
+                    window.__carrotAaMirror
+                )return;
+
                 window.__carrotAaMirror=true;
 
                 function start(){
-                    var v=document.getElementById(
-                        'carrotRoadVideo'
-                    );
-
-                    if(!v){
-                        setTimeout(start,300);
-                        return;
-                    }
-
-                    var p=v.parentElement;
-
-                    if(!p){
-                        setTimeout(start,300);
-                        return;
-                    }
-
-                    var c=document.getElementById(
-                        'carrotAaVideoMirror'
-                    );
-
-                    if(!c){
-                        c=document.createElement(
-                            'canvas'
+                    const v=
+                        document.getElementById(
+                            'carrotRoadVideo'
                         );
 
-                        c.id='carrotAaVideoMirror';
-
-                        c.style.position='absolute';
-                        c.style.left='0';
-                        c.style.top='0';
-                        c.style.width='100%';
-                        c.style.height='100%';
-                        c.style.zIndex='0';
-                        c.style.pointerEvents='none';
-                        c.style.background='#000';
-
-                        p.insertBefore(c,v);
+                    if(!v){
+                        setTimeout(
+                            start,
+                            300
+                        );
+                        return;
                     }
 
-                    v.style.visibility='hidden';
+                    const p=
+                        v.parentElement;
 
-                    var ctx=c.getContext(
-                        '2d',
-                        {alpha:false}
-                    );
+                    if(!p){
+                        setTimeout(
+                            start,
+                            300
+                        );
+                        return;
+                    }
 
-                    function draw(){
+                    let c=
+                        document.getElementById(
+                            'carrotAaVideoMirror'
+                        );
+
+                    if(!c){
+                        c=
+                            document.createElement(
+                                'canvas'
+                            );
+
+                        c.id=
+                            'carrotAaVideoMirror';
+
+                        c.style.position=
+                            'absolute';
+
+                        c.style.left='0';
+                        c.style.top='0';
+
+                        c.style.width='100%';
+                        c.style.height='100%';
+
+                        c.style.zIndex='0';
+
+                        c.style.pointerEvents=
+                            'none';
+
+                        c.style.background=
+                            '#000';
+
+                        p.insertBefore(
+                            c,
+                            v
+                        );
+                    }
+
+                    v.style.visibility=
+                        'hidden';
+
+                    const ctx=
+                        c.getContext(
+                            '2d',
+                            {alpha:false}
+                        );
+
+                    let last=0;
+
+                    function draw(now){
+                        // 미러 자체도 20fps로 제한.
+                        // 2배 업스케일 제거.
                         if(
+                            now-last >= 50 &&
                             v.videoWidth>0 &&
                             v.videoHeight>0
                         ){
-                            var cw=
-                                p.clientWidth||1280;
+                            last=now;
 
-                            var ch=
-                                p.clientHeight||720;
+                            const cw=
+                                p.clientWidth ||
+                                1280;
 
-                            var q=Math.min(
-                                2,
+                            const ch=
+                                p.clientHeight ||
+                                720;
+
+                            if(
+                                c.width!==cw
+                            ){
+                                c.width=cw;
+                            }
+
+                            if(
+                                c.height!==ch
+                            ){
+                                c.height=ch;
+                            }
+
+                            const vw=
+                                v.videoWidth;
+
+                            const vh=
+                                v.videoHeight;
+
+                            const scale=
                                 Math.max(
-                                    1,
-                                    v.videoWidth/cw
-                                )
-                            );
+                                    cw/vw,
+                                    ch/vh
+                                );
 
-                            var bw=
-                                Math.round(cw*q);
+                            const dw=
+                                vw*scale;
 
-                            var bh=
-                                Math.round(ch*q);
+                            const dh=
+                                vh*scale;
 
-                            if(c.width!==bw){
-                                c.width=bw;
-                            }
+                            const dx=
+                                (cw-dw)/2;
 
-                            if(c.height!==bh){
-                                c.height=bh;
-                            }
-
-                            var vw=v.videoWidth;
-                            var vh=v.videoHeight;
-
-                            var scale=Math.max(
-                                bw/vw,
-                                bh/vh
-                            );
-
-                            var dw=vw*scale;
-                            var dh=vh*scale;
-
-                            var dx=(bw-dw)/2;
-                            var dy=(bh-dh)/2;
+                            const dy=
+                                (ch-dh)/2;
 
                             try{
-                                ctx.imageSmoothingEnabled=
-                                    true;
-
-                                ctx.imageSmoothingQuality=
-                                    'high';
-
-                                ctx.fillStyle='#000';
+                                ctx.fillStyle=
+                                    '#000';
 
                                 ctx.fillRect(
                                     0,
                                     0,
-                                    bw,
-                                    bh
+                                    cw,
+                                    ch
                                 );
 
                                 ctx.drawImage(
@@ -465,30 +629,40 @@ class CarrotMainScreen(
                             }catch(e){}
                         }
 
-                        requestAnimationFrame(draw);
+                        requestAnimationFrame(
+                            draw
+                        );
                     }
 
-                    draw();
+                    requestAnimationFrame(
+                        draw
+                    );
                 }
 
                 start();
             })();
         """.trimIndent()
 
-        view?.evaluateJavascript(js, null)
+        view?.evaluateJavascript(
+            js,
+            null
+        )
     }
 
     private fun start() {
         job?.cancel()
 
         job =
-            CoroutineScope(Dispatchers.IO).launch {
+            CoroutineScope(
+                Dispatchers.IO
+            ).launch {
 
                 drawMessage(
                     "콤마4 탐색 중..."
                 )
 
-                val ip=findCommaIp()
+                val ip=
+                    findCommaIp()
 
                 if(ip==null){
                     drawMessage(
@@ -504,7 +678,9 @@ class CarrotMainScreen(
                     return@launch
                 }
 
-                withContext(Dispatchers.Main) {
+                withContext(
+                    Dispatchers.Main
+                ){
                     measureWebView()
 
                     webView?.loadUrl(
@@ -519,8 +695,9 @@ class CarrotMainScreen(
     private suspend fun renderLoop() {
         while(rendering){
 
-            withContext(Dispatchers.Main){
-
+            withContext(
+                Dispatchers.Main
+            ){
                 val surface=
                     container?.surface
                         ?:return@withContext
@@ -534,29 +711,40 @@ class CarrotMainScreen(
                 }
 
                 var canvas:
-                    android.graphics.Canvas?=null
+                    android.graphics.Canvas?=
+                    null
 
                 try{
                     canvas=
-                        surface.lockCanvas(null)
+                        surface.lockCanvas(
+                            null
+                        )
 
-                    canvas?.let{
-                        it.drawColor(Color.BLACK)
+                    canvas?.let {
+                        it.drawColor(
+                            Color.BLACK
+                        )
 
-                        surfaceW=it.width
-                        surfaceH=it.height
+                        surfaceW=
+                            it.width
+
+                        surfaceH=
+                            it.height
 
                         val sx=
                             it.width.toFloat() /
-                            WEB_W
+                            WEB_W.toFloat()
 
                         val sy=
                             it.height.toFloat() /
-                            WEB_H
+                            WEB_H.toFloat()
 
                         it.save()
 
-                        it.scale(sx,sy)
+                        it.scale(
+                            sx,
+                            sy
+                        )
 
                         wv.draw(it)
 
@@ -564,8 +752,8 @@ class CarrotMainScreen(
                     }
 
                 }finally{
-                    canvas?.let{
-                        runCatching{
+                    canvas?.let {
+                        runCatching {
                             surface
                                 .unlockCanvasAndPost(
                                     it
@@ -575,7 +763,9 @@ class CarrotMainScreen(
                 }
             }
 
-            delay(33)
+            delay(
+                RENDER_DELAY
+            )
         }
     }
 
@@ -583,26 +773,41 @@ class CarrotMainScreen(
         message:String
     ){
         val surface=
-            container?.surface ?:return
+            container?.surface
+                ?:return
 
-        if(!surface.isValid)return
+        if(!surface.isValid){
+            return
+        }
 
         var canvas:
-            android.graphics.Canvas?=null
+            android.graphics.Canvas?=
+            null
 
         try{
-            canvas=surface.lockCanvas(null)
+            canvas=
+                surface.lockCanvas(
+                    null
+                )
 
-            canvas?.let{
-                it.drawColor(Color.BLACK)
+            canvas?.let {
+                it.drawColor(
+                    Color.BLACK
+                )
 
                 val p=
-                    Paint().apply{
-                        color=Color.WHITE
-                        textSize=32f
+                    Paint().apply {
+                        color=
+                            Color.WHITE
+
+                        textSize=
+                            32f
+
                         textAlign=
                             Paint.Align.CENTER
-                        isAntiAlias=true
+
+                        isAntiAlias=
+                            true
                     }
 
                 it.drawText(
@@ -614,21 +819,23 @@ class CarrotMainScreen(
             }
 
         }finally{
-            canvas?.let{
-                runCatching{
+            canvas?.let {
+                runCatching {
                     surface
-                        .unlockCanvasAndPost(it)
+                        .unlockCanvasAndPost(
+                            it
+                        )
                 }
             }
         }
     }
 
     private suspend fun findCommaIp():
-        String?=coroutineScope{
+        String?=coroutineScope {
 
         val subnets=
             (
-                localSubnets()+
+                localSubnets() +
                 listOf(
                     "10.142.142",
                     "192.168.43",
@@ -646,9 +853,13 @@ class CarrotMainScreen(
         for(subnet in subnets){
 
             val tasks=
-                (2..254).map{i->
-                    async(Dispatchers.IO){
-                        val ip="$subnet.$i"
+                (2..254).map { i ->
+
+                    async(
+                        Dispatchers.IO
+                    ){
+                        val ip=
+                            "$subnet.$i"
 
                         if(
                             portOpen(
@@ -666,12 +877,13 @@ class CarrotMainScreen(
 
             val found=
                 tasks.awaitAll()
-                    .firstOrNull{
+                    .firstOrNull {
                         it!=null
                     }
 
             if(found!=null){
-                return@coroutineScope found
+                return@coroutineScope
+                    found
             }
         }
 
@@ -684,7 +896,7 @@ class CarrotMainScreen(
         val result=
             mutableListOf<String>()
 
-        runCatching{
+        runCatching {
             val interfaces=
                 Collections.list(
                     NetworkInterface
@@ -701,15 +913,19 @@ class CarrotMainScreen(
                 for(address in addresses){
 
                     if(
-                        !address.isLoopbackAddress &&
-                        address is Inet4Address
+                        !address
+                            .isLoopbackAddress &&
+                        address
+                            is Inet4Address
                     ){
                         val host=
                             address.hostAddress
                                 ?:continue
 
                         val dot=
-                            host.lastIndexOf('.')
+                            host.lastIndexOf(
+                                '.'
+                            )
 
                         if(dot>0){
                             result.add(
@@ -734,7 +950,7 @@ class CarrotMainScreen(
     ):Boolean{
 
         return try{
-            Socket().use{
+            Socket().use {
                 it.connect(
                     InetSocketAddress(
                         ip,
@@ -746,7 +962,9 @@ class CarrotMainScreen(
 
             true
 
-        }catch(_:Exception){
+        }catch(
+            _:Exception
+        ){
             false
         }
     }
@@ -754,20 +972,26 @@ class CarrotMainScreen(
     override fun onGetTemplate():
         Template{
 
-        return NavigationTemplate.Builder()
+        return NavigationTemplate
+            .Builder()
             .setMapActionStrip(
-                ActionStrip.Builder()
+                ActionStrip
+                    .Builder()
                     .addAction(
                         Action.PAN
                     )
                     .build()
             )
             .setActionStrip(
-                ActionStrip.Builder()
+                ActionStrip
+                    .Builder()
                     .addAction(
-                        Action.Builder()
-                            .setTitle("재시도")
-                            .setOnClickListener{
+                        Action
+                            .Builder()
+                            .setTitle(
+                                "재시도"
+                            )
+                            .setOnClickListener {
                                 start()
                             }
                             .build()

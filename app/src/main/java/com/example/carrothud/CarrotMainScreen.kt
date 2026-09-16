@@ -2,7 +2,6 @@ package com.example.carrothud
 
 import android.graphics.Color
 import android.graphics.Paint
-import android.os.SystemClock
 import android.view.View
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -47,15 +46,6 @@ class CarrotMainScreen(
     @Volatile
     private var surfaceH = 0
 
-    @Volatile
-    private var touchX = -1f
-
-    @Volatile
-    private var touchY = -1f
-
-    @Volatile
-    private var touchUntil = 0L
-
     init {
         runCatching {
             carContext.getCarService(
@@ -94,11 +84,6 @@ class CarrotMainScreen(
     }
 
     override fun onClick(x: Float, y: Float) {
-        touchX = x
-        touchY = y
-        touchUntil =
-            SystemClock.uptimeMillis() + 1200
-
         val wv = webView ?: return
         val sw = surfaceW
         val sh = surfaceH
@@ -146,9 +131,7 @@ class CarrotMainScreen(
                 if(!t)t=e;
 
                 try{
-                    t.focus({
-                        preventScroll:true
-                    });
+                    t.focus({preventScroll:true});
                 }catch(z){}
 
                 try{
@@ -157,9 +140,7 @@ class CarrotMainScreen(
             })();
         """.trimIndent()
 
-        wv.post {
-            wv.evaluateJavascript(js, null)
-        }
+        wv.evaluateJavascript(js, null)
     }
 
     private fun createWebView() {
@@ -175,13 +156,9 @@ class CarrotMainScreen(
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
-
-                mediaPlaybackRequiresUserGesture =
-                    false
-
+                mediaPlaybackRequiresUserGesture = false
                 useWideViewPort = true
                 loadWithOverviewMode = false
-
                 textZoom = 100
 
                 layoutAlgorithm =
@@ -303,7 +280,8 @@ class CarrotMainScreen(
                 var timer=setInterval(function(){
                     attempts++;
 
-                    var all=document.getElementsByTagName('*');
+                    var all=
+                        document.getElementsByTagName('*');
 
                     for(var i=0;i<all.length;i++){
                         var el=all[i];
@@ -315,10 +293,15 @@ class CarrotMainScreen(
                         ).trim();
 
                         if(
-                            txt.indexOf('당근 비전 시작')!==-1 ||
-                            txt.indexOf('비전 시작')!==-1
+                            txt.indexOf(
+                                '당근 비전 시작'
+                            )!==-1 ||
+                            txt.indexOf(
+                                '비전 시작'
+                            )!==-1
                         ){
-                            var button=el.closest('button');
+                            var button=
+                                el.closest('button');
 
                             if(button){
                                 button.click();
@@ -332,7 +315,10 @@ class CarrotMainScreen(
                                     'vision-start-overlay'
                                 )
                             ){
-                                var b=el.querySelector('button');
+                                var b=
+                                    el.querySelector(
+                                        'button'
+                                    );
 
                                 if(b){
                                     b.click();
@@ -381,7 +367,9 @@ class CarrotMainScreen(
                     );
 
                     if(!c){
-                        c=document.createElement('canvas');
+                        c=document.createElement(
+                            'canvas'
+                        );
 
                         c.id='carrotAaVideoMirror';
 
@@ -409,8 +397,11 @@ class CarrotMainScreen(
                             v.videoWidth>0 &&
                             v.videoHeight>0
                         ){
-                            var cw=p.clientWidth||1280;
-                            var ch=p.clientHeight||720;
+                            var cw=
+                                p.clientWidth||1280;
+
+                            var ch=
+                                p.clientHeight||720;
 
                             var q=Math.min(
                                 2,
@@ -420,11 +411,19 @@ class CarrotMainScreen(
                                 )
                             );
 
-                            var bw=Math.round(cw*q);
-                            var bh=Math.round(ch*q);
+                            var bw=
+                                Math.round(cw*q);
 
-                            if(c.width!==bw)c.width=bw;
-                            if(c.height!==bh)c.height=bh;
+                            var bh=
+                                Math.round(ch*q);
+
+                            if(c.width!==bw){
+                                c.width=bw;
+                            }
+
+                            if(c.height!==bh){
+                                c.height=bh;
+                            }
 
                             var vw=v.videoWidth;
                             var vh=v.videoHeight;
@@ -441,10 +440,14 @@ class CarrotMainScreen(
                             var dy=(bh-dh)/2;
 
                             try{
-                                ctx.imageSmoothingEnabled=true;
-                                ctx.imageSmoothingQuality='high';
+                                ctx.imageSmoothingEnabled=
+                                    true;
+
+                                ctx.imageSmoothingQuality=
+                                    'high';
 
                                 ctx.fillStyle='#000';
+
                                 ctx.fillRect(
                                     0,
                                     0,
@@ -481,16 +484,22 @@ class CarrotMainScreen(
         job =
             CoroutineScope(Dispatchers.IO).launch {
 
-                drawMessage("콤마4 탐색 중...")
+                drawMessage(
+                    "콤마4 탐색 중..."
+                )
 
                 val ip=findCommaIp()
 
                 if(ip==null){
-                    drawMessage("콤마4를 찾지 못함")
+                    drawMessage(
+                        "콤마4를 찾지 못함"
+                    )
 
                     delay(2000)
 
-                    if(rendering)start()
+                    if(rendering){
+                        start()
+                    }
 
                     return@launch
                 }
@@ -528,7 +537,8 @@ class CarrotMainScreen(
                     android.graphics.Canvas?=null
 
                 try{
-                    canvas=surface.lockCanvas(null)
+                    canvas=
+                        surface.lockCanvas(null)
 
                     canvas?.let{
                         it.drawColor(Color.BLACK)
@@ -537,10 +547,12 @@ class CarrotMainScreen(
                         surfaceH=it.height
 
                         val sx=
-                            it.width.toFloat()/WEB_W
+                            it.width.toFloat() /
+                            WEB_W
 
                         val sy=
-                            it.height.toFloat()/WEB_H
+                            it.height.toFloat() /
+                            WEB_H
 
                         it.save()
 
@@ -549,31 +561,15 @@ class CarrotMainScreen(
                         wv.draw(it)
 
                         it.restore()
-
-                        if(
-                            SystemClock.uptimeMillis()
-                            <touchUntil
-                        ){
-                            val paint=
-                                Paint().apply{
-                                    color=Color.RED
-                                    isAntiAlias=true
-                                }
-
-                            it.drawCircle(
-                                touchX,
-                                touchY,
-                                30f,
-                                paint
-                            )
-                        }
                     }
 
                 }finally{
                     canvas?.let{
                         runCatching{
                             surface
-                                .unlockCanvasAndPost(it)
+                                .unlockCanvasAndPost(
+                                    it
+                                )
                         }
                     }
                 }
@@ -583,7 +579,9 @@ class CarrotMainScreen(
         }
     }
 
-    private fun drawMessage(message:String){
+    private fun drawMessage(
+        message:String
+    ){
         val surface=
             container?.surface ?:return
 
@@ -602,7 +600,8 @@ class CarrotMainScreen(
                     Paint().apply{
                         color=Color.WHITE
                         textSize=32f
-                        textAlign=Paint.Align.CENTER
+                        textAlign=
+                            Paint.Align.CENTER
                         isAntiAlias=true
                     }
 
@@ -617,7 +616,8 @@ class CarrotMainScreen(
         }finally{
             canvas?.let{
                 runCatching{
-                    surface.unlockCanvasAndPost(it)
+                    surface
+                        .unlockCanvasAndPost(it)
                 }
             }
         }
@@ -656,7 +656,11 @@ class CarrotMainScreen(
                                 7000,
                                 250
                             )
-                        )ip else null
+                        ){
+                            ip
+                        }else{
+                            null
+                        }
                     }
                 }
 
@@ -753,7 +757,9 @@ class CarrotMainScreen(
         return NavigationTemplate.Builder()
             .setMapActionStrip(
                 ActionStrip.Builder()
-                    .addAction(Action.PAN)
+                    .addAction(
+                        Action.PAN
+                    )
                     .build()
             )
             .setActionStrip(

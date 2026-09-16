@@ -31,9 +31,7 @@ class CarrotMainScreen(
     companion object {
         private const val WEB_W = 1280
         private const val WEB_H = 720
-
-        // 약 30fps
-        private const val RENDER_DELAY = 33L
+        private const val RENDER_DELAY = 40L
     }
 
     private var container: SurfaceContainer? = null
@@ -88,19 +86,16 @@ class CarrotMainScreen(
 
     override fun onClick(x: Float, y: Float) {
         val wv = webView ?: return
-
         val sw = surfaceW
         val sh = surfaceH
 
         if (sw <= 0 || sh <= 0) return
 
         val wx =
-            x * WEB_W.toFloat() /
-            sw.toFloat()
+            x * WEB_W.toFloat() / sw.toFloat()
 
         val wy =
-            y * WEB_H.toFloat() /
-            sh.toFloat()
+            y * WEB_H.toFloat() / sh.toFloat()
 
         val js = """
             (function(){
@@ -115,7 +110,7 @@ class CarrotMainScreen(
                     '[role="button"],'+
                     '[onclick]';
 
-                let e=
+                const e=
                     document.elementFromPoint(x,y);
 
                 let target=
@@ -128,7 +123,7 @@ class CarrotMainScreen(
                         );
 
                     let best=null;
-                    let bestDist=45;
+                    let bestDist=25;
 
                     for(const el of all){
                         const r=
@@ -212,7 +207,6 @@ class CarrotMainScreen(
                         WebSettings.LayoutAlgorithm.NORMAL
 
                     setSupportZoom(false)
-
                     builtInZoomControls = false
                     displayZoomControls = false
 
@@ -338,7 +332,6 @@ class CarrotMainScreen(
                 `;
 
                 document.head.appendChild(s);
-
                 window.scrollTo(0,0);
             })();
         """.trimIndent()
@@ -462,8 +455,7 @@ class CarrotMainScreen(
                         return;
                     }
 
-                    const p=
-                        v.parentElement;
+                    const p=v.parentElement;
 
                     if(!p){
                         setTimeout(
@@ -487,9 +479,7 @@ class CarrotMainScreen(
                         c.id=
                             'carrotAaVideoMirror';
 
-                        c.style.position=
-                            'absolute';
-
+                        c.style.position='absolute';
                         c.style.left='0';
                         c.style.top='0';
 
@@ -501,35 +491,28 @@ class CarrotMainScreen(
                         c.style.pointerEvents=
                             'none';
 
-                        c.style.background=
-                            '#000';
+                        c.style.background='#000';
 
-                        p.insertBefore(
-                            c,
-                            v
-                        );
+                        p.insertBefore(c,v);
                     }
 
-                    v.style.visibility=
-                        'hidden';
+                    v.style.visibility='hidden';
 
                     const ctx=
                         c.getContext(
                             '2d',
-                            {alpha:false}
+                            {
+                                alpha:false,
+                                desynchronized:true
+                            }
                         );
 
                     let last=0;
 
                     function draw(now){
 
-                        /*
-                         * 30fps 제한.
-                         * 2배 Canvas 대신 최대 1.5배.
-                         * 화질과 부하의 중간값.
-                         */
                         if(
-                            now-last >= 33 &&
+                            now-last>=40 &&
                             v.videoWidth>0 &&
                             v.videoHeight>0
                         ){
@@ -543,6 +526,11 @@ class CarrotMainScreen(
                                 p.clientHeight ||
                                 720;
 
+                            /*
+                             * 720p CSS 화면은 유지.
+                             * 원본 영상이 더 크면
+                             * 최대 1.5배 backing canvas.
+                             */
                             const ratio=
                                 Math.min(
                                     1.5,
@@ -563,15 +551,11 @@ class CarrotMainScreen(
                                     ch*ratio
                                 );
 
-                            if(
-                                c.width!==bw
-                            ){
+                            if(c.width!==bw){
                                 c.width=bw;
                             }
 
-                            if(
-                                c.height!==bh
-                            ){
+                            if(c.height!==bh){
                                 c.height=bh;
                             }
 
@@ -606,8 +590,7 @@ class CarrotMainScreen(
                                 ctx.imageSmoothingQuality=
                                     'high';
 
-                                ctx.fillStyle=
-                                    '#000';
+                                ctx.fillStyle='#000';
 
                                 ctx.fillRect(
                                     0,
@@ -721,6 +704,7 @@ class CarrotMainScreen(
                         )
 
                     canvas?.let {
+
                         it.drawColor(
                             Color.BLACK
                         )
@@ -791,6 +775,7 @@ class CarrotMainScreen(
                 )
 
             canvas?.let {
+
                 it.drawColor(
                     Color.BLACK
                 )
@@ -806,8 +791,7 @@ class CarrotMainScreen(
                         textAlign=
                             Paint.Align.CENTER
 
-                        isAntiAlias=
-                            true
+                        isAntiAlias=true
                     }
 
                 it.drawText(
@@ -858,8 +842,7 @@ class CarrotMainScreen(
                     async(
                         Dispatchers.IO
                     ){
-                        val ip=
-                            "$subnet.$i"
+                        val ip="$subnet.$i"
 
                         if(
                             portOpen(

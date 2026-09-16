@@ -8,19 +8,24 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import kotlinx.coroutines.*
+import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.util.Collections
 
 class MainActivity : Activity() {
+
     private lateinit var webView: WebView
     private var scanJob: Job? = null
+    private var loaded = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
 
         webView = WebView(this)
         setContentView(webView)
@@ -31,88 +36,202 @@ class MainActivity : Activity() {
             mediaPlaybackRequiresUserGesture = false
             useWideViewPort = true
             loadWithOverviewMode = true
-            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            mixedContentMode =
+                WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
-        webView.webViewClient = WebViewClient()
+
+        webView.setRendererPriorityPolicy(
+            WebView.RENDERER_PRIORITY_IMPORTANT,
+            false
+        )
+
+        webView.webViewClient =
+            object : WebViewClient() {
+                override fun onPageFinished(
+                    view: WebView?,
+                    url: String?
+                ) {
+                    super.onPageFinished(view, url)
+
+                    view?.onResume()
+                    view?.resumeTimers()
+                }
+            }
 
         scanAndLoadCommaVision()
     }
 
-    private fun scanAndLoadCommaVision() {
-        Toast.makeText(this, "콤마4 (포트 7000) 탐색 중...", Toast.LENGTH_SHORT).show()
+    override fun onResume() {
+        super.onResume()
 
-        scanJob?.cancel()
-        scanJob = CoroutineScope(Dispatchers.IO).launch {
-            val commaIp = findCommaDeviceIp()
-            withContext(Dispatchers.Main) {
-                if (commaIp != null) {
-                    val visionUrl = "http://$commaIp:7000"
-                    Toast.makeText(this@MainActivity, "콤마4 연결 성공: $visionUrl", Toast.LENGTH_SHORT).show()
-                    webView.loadUrl(visionUrl)
-                } else {
-                    Toast.makeText(this@MainActivity, "콤마4 미발견 (재탐색 중)", Toast.LENGTH_SHORT).show()
-                    delay(2000)
-                    scanAndLoadCommaVision()
-                }
-            }
+        if (::webView.isInitialized) {
+            webView.onResume()
+            webView.resumeTimers()
         }
     }
 
-    private suspend fun findCommaDeviceIp(): String? = coroutineScope {
-        val localSubnets = getLocalSubnets()
-        val candidateSubnets = (localSubnets + listOf(
-            "192.168.43", "192.168.42", "192.168.137", "192.168.225",
-            "172.20.10", "10.42.0", "192.168.0", "192.168.1", "192.168.8"
-        )).distinct()
+    override fun onPause() {
+        if (::webView.isInitialized) {
+            webView.onPause()
+        }
 
-        for (subnet in candidateSubnets) {
-            val tasks = (2..254).map { i ->
-                async(Dispatchers.IO) {
-                    val testIp = "$subnet.$i"
-                    if (isPortOpen(testIp, 7000, 250)) testIp else null
+        super.onPause()
+    }
+
+    private fun scanAndLoadCommaVision() {
+        if (loaded) return
+
+        scanJob?.cancel()
+
+        Toast.makeText(
+            this,
+            "콤마4 탐색 중...",
+            Toast.LENGTH_SHORT
+        ).show()
+
+        scanJob =
+            CoroutineScope(Dispatchers.IO).launch {
+
+                val ip = findCommaDeviceIp()
+
+                withContext(Dispatchers.Main) {
+                    if (ip != null) {
+                        loaded = true
+
+                        webView.onResume()
+                        webView.resumeTimers()
+
+                        webView.loadUrl(
+                            "http://$ip:7000"
+                        )
+
+                    } else {
+                        delay(2000)
+                        scanAndLoadCommaVision()
+                    }
                 }
             }
-            val foundIp = tasks.awaitAll().firstOrNull { it != null }
-            if (foundIp != null) return@coroutineScope foundIp
+    }
+
+    private suspend fun findCommaDeviceIp():
+        String? = coroutineScope {
+
+        val subnets =
+            (
+                getLocalSubnets() +
+                listOf(
+                    "10.142.142",
+                    "192.168.43",
+                    "192.168.42",
+                    "192.168.137",
+                    "192.168.225",
+                    "172.20.10",
+                    "10.42.0",
+                    "192.168.0",
+                    "192.168.1",
+                    "192.168.8"
+                )
+            ).distinct()
+
+        for (subnet in subnets) {
+            val jobs =
+                (2..254).map { i ->
+                    async(Dispatchers.IO) {
+                        val ip = "$subnet.$i"
+
+                        if (
+                            isPortOpen(
+                                ip,
+                                7000,
+                                250
+                            )
+                        ) ip else null
+                    }
+                }
+
+            val found =
+                jobs.awaitAll()
+                    .firstOrNull { it != null }
+
+            if (found != null) {
+                return@coroutineScope found
+            }
         }
+
         null
     }
 
-    private fun getLocalSubnets(): List<String> {
-        val subnets = mutableListOf<String>()
-        try {
-            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-            for (intf in interfaces) {
-                val addrs = Collections.list(intf.inetAddresses)
-                for (addr in addrs) {
-                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                        val hostAddress = addr.hostAddress ?: continue
-                        val lastDot = hostAddress.lastIndexOf('.')
-                        if (lastDot > 0) {
-                            subnets.add(hostAddress.substring(0, lastDot))
+    private fun getLocalSubnets():
+        List<String> {
+
+        val result =
+            mutableListOf<String>()
+
+        runCatching {
+            val interfaces =
+                Collections.list(
+                    NetworkInterface
+                        .getNetworkInterfaces()
+                )
+
+            for (network in interfaces) {
+                for (
+                    address in
+                    Collections.list(
+                        network.inetAddresses
+                    )
+                ) {
+                    if (
+                        !address.isLoopbackAddress &&
+                        address is Inet4Address
+                    ) {
+                        val host =
+                            address.hostAddress
+                                ?: continue
+
+                        val dot =
+                            host.lastIndexOf('.')
+
+                        if (dot > 0) {
+                            result.add(
+                                host.substring(0, dot)
+                            )
                         }
                     }
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
-        return subnets
+
+        return result.distinct()
     }
 
-    private fun isPortOpen(ip: String, port: Int, timeoutMs: Int): Boolean {
+    private fun isPortOpen(
+        ip: String,
+        port: Int,
+        timeout: Int
+    ): Boolean {
         return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, port), timeoutMs)
-                true
+            Socket().use {
+                it.connect(
+                    InetSocketAddress(ip, port),
+                    timeout
+                )
             }
-        } catch (e: Exception) {
+
+            true
+        } catch (_: Exception) {
             false
         }
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         scanJob?.cancel()
+
+        if (::webView.isInitialized) {
+            webView.stopLoading()
+            webView.destroy()
+        }
+
+        super.onDestroy()
     }
 }

@@ -41,7 +41,18 @@ class CarrotMainScreen(carContext: CarContext) :
 
     private var streamJob: Job? = null
     private var webView: WebView? = null
-    private val renderLock = Any()
+
+    private var surfaceW = 0
+    private var surfaceH = 0
+
+    @Volatile
+    private var touchX = -1f
+
+    @Volatile
+    private var touchY = -1f
+
+    @Volatile
+    private var touchUntil = 0L
 
     init {
         runCatching {
@@ -58,19 +69,23 @@ class CarrotMainScreen(carContext: CarContext) :
             carContext.getCarService(
                 androidx.car.app.AppManager::class.java
             ).setSurfaceCallback(this)
-
         }.onFailure {
-            log("Init: ${it.localizedMessage}")
+            log("Init=${it.localizedMessage}")
         }
     }
 
     override fun onSurfaceAvailable(
         container: SurfaceContainer
     ) {
-        synchronized(renderLock) {
-            surfaceContainer = container
-            isRendering = true
-        }
+        surfaceContainer = container
+        isRendering = true
+
+        surfaceW = 0
+        surfaceH = 0
+
+        log(
+            "Surface=${container.width}x${container.height}"
+        )
 
         CoroutineScope(Dispatchers.Main).launch {
             initWebView()
@@ -82,35 +97,34 @@ class CarrotMainScreen(carContext: CarContext) :
     override fun onSurfaceDestroyed(
         container: SurfaceContainer
     ) {
-        synchronized(renderLock) {
-            isRendering = false
-            streamJob?.cancel()
-            streamJob = null
-            surfaceContainer = null
-        }
+        isRendering = false
+        streamJob?.cancel()
+        streamJob = null
+        surfaceContainer = null
+        surfaceW = 0
+        surfaceH = 0
     }
 
-    /*
-     * Android Auto Surface 클릭을
-     * 1280x720 WebView 좌표로 변환.
-     */
     override fun onClick(
         x: Float,
         y: Float
     ) {
         val wv = webView ?: return
-        val c = surfaceContainer ?: return
 
-        val sw = c.width
-        val sh = c.height
+        touchX = x
+        touchY = y
+        touchUntil =
+            SystemClock.uptimeMillis() + 1000L
+
+        log("CLICK=$x,$y")
+
+        val sw = surfaceW
+        val sh = surfaceH
 
         if (sw <= 0 || sh <= 0) return
 
-        val sx =
-            sw / WEB_W.toFloat()
-
-        val sy =
-            sh / WEB_H.toFloat()
+        val sx = sw / WEB_W.toFloat()
+        val sy = sh / WEB_H.toFloat()
 
         if (sx <= 0f || sy <= 0f) return
 
@@ -141,7 +155,7 @@ class CarrotMainScreen(carContext: CarContext) :
             val up =
                 MotionEvent.obtain(
                     now,
-                    now + 60,
+                    now + 70L,
                     MotionEvent.ACTION_UP,
                     wx,
                     wy,
@@ -152,9 +166,24 @@ class CarrotMainScreen(carContext: CarContext) :
                 wv.dispatchTouchEvent(down)
                 wv.dispatchTouchEvent(up)
 
-                log(
-                    "TOUCH $x,$y -> $wx,$wy"
-                )
+                /*
+                 * 일반 MotionEvent로 안 먹는 요소를 위한
+                 * click() 보조 경로.
+                 */
+                val ix = wx.toInt()
+                val iy = wy.toInt()
+
+                val js =
+                    "(function(){" +
+                    "var e=document.elementFromPoint($ix,$iy);" +
+                    "if(!e)return;" +
+                    "var t=e.closest(" +
+                    "'button,a,input,[role=\"button\"],[onclick]'" +
+                    ")||e;" +
+                    "if(t&&t.click)t.click();" +
+                    "})();"
+
+                wv.evaluateJavascript(js, null)
 
             } finally {
                 down.recycle()
@@ -166,72 +195,64 @@ class CarrotMainScreen(carContext: CarContext) :
     private fun initWebView() {
         if (webView != null) return
 
-        webView =
-            WebView(carContext).apply {
+        webView = WebView(carContext).apply {
 
-                setLayerType(
-                    View.LAYER_TYPE_HARDWARE,
-                    null
-                )
+            setLayerType(
+                View.LAYER_TYPE_HARDWARE,
+                null
+            )
 
-                isFocusable = true
-                isFocusableInTouchMode = true
+            isFocusable = true
+            isFocusableInTouchMode = true
 
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
 
-                    mediaPlaybackRequiresUserGesture =
-                        false
+                mediaPlaybackRequiresUserGesture =
+                    false
 
-                    useWideViewPort = true
+                useWideViewPort = true
+                loadWithOverviewMode = false
+                textZoom = 100
 
-                    /*
-                     * WebView가 화면 크기에 따라
-                     * 자동으로 배율을 바꾸지 못하게 한다.
-                     */
-                    loadWithOverviewMode = false
+                layoutAlgorithm =
+                    WebSettings.LayoutAlgorithm.NORMAL
 
-                    textZoom = 100
+                setSupportZoom(false)
+                builtInZoomControls = false
+                displayZoomControls = false
 
-                    layoutAlgorithm =
-                        WebSettings.LayoutAlgorithm.NORMAL
-
-                    setSupportZoom(false)
-                    builtInZoomControls = false
-                    displayZoomControls = false
-
-                    mixedContentMode =
-                        WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                }
-
-                webViewClient =
-                    object : WebViewClient() {
-
-                        override fun onPageFinished(
-                            view: WebView?,
-                            url: String?
-                        ) {
-                            super.onPageFinished(
-                                view,
-                                url
-                            )
-
-                            fixDisplay(view)
-                            autoStartVision(view)
-                            installVideoMirror(view)
-                        }
-                    }
+                mixedContentMode =
+                    WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             }
+
+            webViewClient =
+                object : WebViewClient() {
+
+                    override fun onPageFinished(
+                        view: WebView?,
+                        url: String?
+                    ) {
+                        super.onPageFinished(view, url)
+
+                        fixDisplay(view)
+                        autoStartVision(view)
+                        installVideoMirror(view)
+                    }
+                }
+        }
 
         layoutWebView()
     }
 
-    /*
-     * WebView 자체 크기는 무조건 1280x720.
-     */
     private fun layoutWebView() {
         val wv = webView ?: return
+
+        if (
+            wv.width == WEB_W &&
+            wv.height == WEB_H
+        ) return
 
         wv.measure(
             View.MeasureSpec.makeMeasureSpec(
@@ -253,28 +274,42 @@ class CarrotMainScreen(carContext: CarContext) :
     }
 
     /*
-     * 웹페이지 viewport도 1280x720 고정.
+     * 당근 웹 UI의 논리 화면은 계속 1280x720.
+     * 화질 개선 때문에 UI 크기를 바꾸지 않는다.
      */
     private fun fixDisplay(
         view: WebView?
     ) {
         val js =
             "(function(){" +
+            "if(window.__aaLayoutFix)return;" +
+            "window.__aaLayoutFix=true;" +
 
+            "function fix(){" +
             "var d=document.documentElement;" +
-
             "d.style.webkitTextSizeAdjust='100%';" +
             "d.style.width='1280px';" +
             "d.style.height='720px';" +
+            "d.style.minWidth='1280px';" +
+            "d.style.maxWidth='1280px';" +
+            "d.style.minHeight='720px';" +
+            "d.style.maxHeight='720px';" +
             "d.style.margin='0';" +
+            "d.style.padding='0';" +
             "d.style.overflow='hidden';" +
 
             "if(document.body){" +
-            "document.body.style.webkitTextSizeAdjust='100%';" +
-            "document.body.style.width='1280px';" +
-            "document.body.style.height='720px';" +
-            "document.body.style.margin='0';" +
-            "document.body.style.overflow='hidden';" +
+            "var b=document.body;" +
+            "b.style.webkitTextSizeAdjust='100%';" +
+            "b.style.width='1280px';" +
+            "b.style.height='720px';" +
+            "b.style.minWidth='1280px';" +
+            "b.style.maxWidth='1280px';" +
+            "b.style.minHeight='720px';" +
+            "b.style.maxHeight='720px';" +
+            "b.style.margin='0';" +
+            "b.style.padding='0';" +
+            "b.style.overflow='hidden';" +
             "}" +
 
             "var m=document.querySelector(" +
@@ -294,38 +329,34 @@ class CarrotMainScreen(carContext: CarContext) :
             "user-scalable=no';" +
 
             "window.scrollTo(0,0);" +
+            "}" +
 
+            "fix();" +
+
+            /*
+             * 웹쪽 코드가 나중에 viewport/style을
+             * 변경하는 경우 다시 원상복구.
+             */
+            "setInterval(fix,1000);" +
             "})();"
 
-        view?.evaluateJavascript(
-            js,
-            null
-        )
+        view?.evaluateJavascript(js, null)
     }
 
-    /*
-     * 당근 비전 시작 버튼 자동 클릭.
-     */
     private fun autoStartVision(
         view: WebView?
     ) {
         val js =
             "(function(){" +
-
             "var n=0;" +
-
             "var z=setInterval(function(){" +
-
             "n++;" +
 
             "var a=document.getElementsByTagName('*');" +
 
             "for(var i=0;i<a.length;i++){" +
-
             "var e=a[i];" +
-
-            "var t=(e.innerText||" +
-            "e.textContent||'').trim();" +
+            "var t=(e.innerText||e.textContent||'').trim();" +
 
             "if(" +
             "t.indexOf('당근 비전 시작')!==-1||" +
@@ -333,43 +364,32 @@ class CarrotMainScreen(carContext: CarContext) :
             "){" +
             "e.click();" +
             "}" +
-
             "}" +
 
             "if(n>20)clearInterval(z);" +
-
             "},500);" +
-
             "})();"
 
-        view?.evaluateJavascript(
-            js,
-            null
-        )
+        view?.evaluateJavascript(js, null)
     }
 
     /*
-     * 성공했던 카메라 처리 유지.
+     * 성공한 카메라 방식 유지.
      *
-     * WebRTC <video>
-     *       ↓
-     * Canvas2D
-     *       ↓
-     * Android Auto Surface
+     * 차이점:
+     * CSS 크기는 그대로 두고
+     * canvas 내부 픽셀만 고밀도로 만든다.
      */
     private fun installVideoMirror(
         view: WebView?
     ) {
         val js =
             "(function(){" +
-
             "if(window.__carrotAaMirror)return;" +
             "window.__carrotAaMirror=true;" +
 
             "function start(){" +
-
-            "var v=document.getElementById(" +
-            "'carrotRoadVideo');" +
+            "var v=document.getElementById('carrotRoadVideo');" +
 
             "if(!v){" +
             "setTimeout(start,500);" +
@@ -387,7 +407,6 @@ class CarrotMainScreen(carContext: CarContext) :
             "}" +
 
             "var c=document.createElement('canvas');" +
-
             "c.id='carrotAaVideoMirror';" +
 
             "c.style.position='absolute';" +
@@ -400,11 +419,6 @@ class CarrotMainScreen(carContext: CarContext) :
             "c.style.background='#000';" +
 
             "p.insertBefore(c,v);" +
-
-            /*
-             * 실제 video는 WebView.draw에서
-             * 안 잡히므로 숨기고 canvas를 사용.
-             */
             "v.style.visibility='hidden';" +
 
             "var ctx=c.getContext(" +
@@ -412,83 +426,83 @@ class CarrotMainScreen(carContext: CarContext) :
 
             "function draw(){" +
 
-            "if(" +
-            "v.videoWidth>0&&" +
-            "v.videoHeight>0" +
-            "){" +
+            "if(v.videoWidth>0&&v.videoHeight>0){" +
 
             "var cw=p.clientWidth||1280;" +
             "var ch=p.clientHeight||720;" +
 
-            "if(c.width!==cw)c.width=cw;" +
-            "if(c.height!==ch)c.height=ch;" +
+            /*
+             * 최대 2배.
+             * 단 원본 비디오보다 터무니없이
+             * 큰 canvas를 만들지는 않는다.
+             */
+            "var q=2;" +
+
+            "var bw=Math.round(cw*q);" +
+            "var bh=Math.round(ch*q);" +
+
+            "var maxW=Math.max(v.videoWidth,cw);" +
+            "var maxH=Math.max(v.videoHeight,ch);" +
+
+            "bw=Math.min(bw,maxW);" +
+            "bh=Math.min(bh,maxH);" +
+
+            "bw=Math.max(bw,Math.round(cw));" +
+            "bh=Math.max(bh,Math.round(ch));" +
+
+            "if(c.width!==bw)c.width=bw;" +
+            "if(c.height!==bh)c.height=bh;" +
 
             "var vw=v.videoWidth;" +
             "var vh=v.videoHeight;" +
 
-            "var s=Math.max(" +
-            "cw/vw," +
-            "ch/vh" +
-            ");" +
+            /*
+             * 실제 canvas pixel 기준 cover.
+             */
+            "var s=Math.max(bw/vw,bh/vh);" +
 
             "var dw=vw*s;" +
             "var dh=vh*s;" +
-
-            "var dx=(cw-dw)/2;" +
-            "var dy=(ch-dh)/2;" +
+            "var dx=(bw-dw)/2;" +
+            "var dy=(bh-dh)/2;" +
 
             "try{" +
+            "ctx.imageSmoothingEnabled=true;" +
+            "ctx.imageSmoothingQuality='high';" +
 
             "ctx.fillStyle='#000';" +
-            "ctx.fillRect(0,0,cw,ch);" +
+            "ctx.fillRect(0,0,bw,bh);" +
 
             "ctx.drawImage(" +
-            "v," +
-            "dx," +
-            "dy," +
-            "dw," +
-            "dh" +
+            "v,dx,dy,dw,dh" +
             ");" +
 
             "}catch(e){}" +
-
             "}" +
 
             "requestAnimationFrame(draw);" +
-
             "}" +
 
             "draw();" +
-
             "}" +
 
             "start();" +
-
             "})();"
 
-        view?.evaluateJavascript(
-            js,
-            null
-        )
+        view?.evaluateJavascript(js, null)
     }
 
     private fun startStreamingPipeline() {
         streamJob?.cancel()
 
         streamJob =
-            CoroutineScope(
-                Dispatchers.IO
-            ).launch {
+            CoroutineScope(Dispatchers.IO).launch {
 
-                drawMessage(
-                    "콤마4 탐색 중..."
-                )
+                drawMessage("콤마4 탐색 중...")
 
-                val ip =
-                    findCommaDeviceIp()
+                val ip = findCommaDeviceIp()
 
                 if (ip == null) {
-
                     drawMessage(
                         "콤마4(포트 7000)를 찾지 못함"
                     )
@@ -502,17 +516,13 @@ class CarrotMainScreen(carContext: CarContext) :
                     return@launch
                 }
 
-                log(
-                    "Comma=$ip"
-                )
+                log("Comma=$ip")
 
                 drawMessage(
                     "영상 스트리밍 연결 중..."
                 )
 
-                withContext(
-                    Dispatchers.Main
-                ) {
+                withContext(Dispatchers.Main) {
                     layoutWebView()
 
                     webView?.loadUrl(
@@ -524,22 +534,10 @@ class CarrotMainScreen(carContext: CarContext) :
             }
     }
 
-    /*
-     * 핵심:
-     *
-     * 1280x720 WebView 전체를
-     * Android Auto Surface 전체 크기로
-     * X/Y 각각 늘려서 그린다.
-     *
-     * 따라서 잘리는 영역 없음.
-     */
     private suspend fun startRenderLoop() {
-
         while (isRendering) {
 
-            withContext(
-                Dispatchers.Main
-            ) {
+            withContext(Dispatchers.Main) {
 
                 val c =
                     surfaceContainer
@@ -563,8 +561,7 @@ class CarrotMainScreen(carContext: CarContext) :
                 layoutWebView()
 
                 var canvas:
-                    android.graphics.Canvas? =
-                    null
+                    android.graphics.Canvas? = null
 
                 try {
                     canvas =
@@ -572,47 +569,81 @@ class CarrotMainScreen(carContext: CarContext) :
 
                     if (canvas != null) {
 
-                        canvas.drawColor(
-                            Color.BLACK
-                        )
+                        canvas.drawColor(Color.BLACK)
+
+                        /*
+                         * 첫 정상 프레임에서만
+                         * Android Auto Surface 크기를 잡는다.
+                         */
+                        if (
+                            surfaceW <= 0 ||
+                            surfaceH <= 0
+                        ) {
+                            surfaceW = canvas.width
+                            surfaceH = canvas.height
+
+                            log(
+                                "RenderSurface=" +
+                                "${surfaceW}x${surfaceH}"
+                            )
+                        }
 
                         val sx =
-                            canvas.width /
+                            surfaceW /
                                 WEB_W.toFloat()
 
                         val sy =
-                            canvas.height /
+                            surfaceH /
                                 WEB_H.toFloat()
 
                         canvas.save()
 
-                        canvas.scale(
-                            sx,
-                            sy
-                        )
+                        /*
+                         * 잘라내지 않고 Surface에 맞춤.
+                         * 1280x720 UI 전체가 항상 남는다.
+                         */
+                        canvas.scale(sx, sy)
 
-                        wv.draw(
-                            canvas
-                        )
+                        wv.draw(canvas)
 
                         canvas.restore()
+
+                        /*
+                         * SurfaceCallback.onClick이
+                         * 실제로 들어오면 빨간점.
+                         */
+                        if (
+                            SystemClock.uptimeMillis() <
+                            touchUntil
+                        ) {
+                            val paint =
+                                Paint().apply {
+                                    color = Color.RED
+                                    style =
+                                        Paint.Style.FILL
+                                    isAntiAlias = true
+                                }
+
+                            canvas.drawCircle(
+                                touchX,
+                                touchY,
+                                28f,
+                                paint
+                            )
+                        }
                     }
 
                 } catch (e: Throwable) {
-
                     log(
-                        "Render: " +
-                        e.localizedMessage
+                        "Render=${e.localizedMessage}"
                     )
 
                 } finally {
-
                     if (canvas != null) {
                         runCatching {
-                            surface
-                                .unlockCanvasAndPost(
-                                    canvas
-                                )
+                            surface.unlockCanvasAndPost(
+                                canvas
+                            )
                         }
                     }
                 }
@@ -625,154 +656,110 @@ class CarrotMainScreen(carContext: CarContext) :
     private fun drawMessage(
         message: String
     ) {
-        synchronized(renderLock) {
+        val c = surfaceContainer ?: return
+        val surface = c.surface ?: return
 
-            val c =
-                surfaceContainer
-                    ?: return
+        if (
+            !surface.isValid ||
+            !isRendering
+        ) return
 
-            val surface =
-                c.surface
-                    ?: return
+        var canvas:
+            android.graphics.Canvas? = null
 
-            if (
-                !surface.isValid ||
-                !isRendering
-            ) return
+        try {
+            canvas = surface.lockCanvas(null)
 
-            var canvas:
-                android.graphics.Canvas? =
-                null
+            if (canvas != null) {
+                canvas.drawColor(Color.BLACK)
 
-            try {
-                canvas =
-                    surface.lockCanvas(null)
-
-                if (canvas != null) {
-
-                    canvas.drawColor(
-                        Color.BLACK
-                    )
-
-                    val paint =
-                        Paint().apply {
-                            color =
-                                Color.WHITE
-
-                            textSize =
-                                32f
-
-                            textAlign =
-                                Paint.Align.CENTER
-
-                            isAntiAlias =
-                                true
-                        }
-
-                    canvas.drawText(
-                        message,
-                        canvas.width / 2f,
-                        canvas.height / 2f,
-                        paint
-                    )
-                }
-
-            } catch (e: Throwable) {
-
-                log(
-                    "Message: " +
-                    e.localizedMessage
-                )
-
-            } finally {
-
-                if (canvas != null) {
-                    runCatching {
-                        surface
-                            .unlockCanvasAndPost(
-                                canvas
-                            )
+                val paint =
+                    Paint().apply {
+                        color = Color.WHITE
+                        textSize = 32f
+                        textAlign =
+                            Paint.Align.CENTER
+                        isAntiAlias = true
                     }
+
+                canvas.drawText(
+                    message,
+                    canvas.width / 2f,
+                    canvas.height / 2f,
+                    paint
+                )
+            }
+
+        } catch (e: Throwable) {
+            log(
+                "Message=${e.localizedMessage}"
+            )
+
+        } finally {
+            if (canvas != null) {
+                runCatching {
+                    surface.unlockCanvasAndPost(
+                        canvas
+                    )
                 }
             }
-        }
-    }
-
-    private fun log(
-        msg: String
-    ) {
-        runCatching {
-
-            File(
-                carContext.filesDir,
-                "carrot_crash.txt"
-            ).appendText(
-                "${java.util.Date()}: $msg\n"
-            )
         }
     }
 
     private suspend fun findCommaDeviceIp():
-        String? =
-        coroutineScope {
+        String? = coroutineScope {
 
-            val subnets =
-                (
-                    getLocalSubnets() +
-                    listOf(
-                        "10.142.142",
-                        "192.168.43",
-                        "192.168.42",
-                        "192.168.137",
-                        "192.168.225",
-                        "172.20.10",
-                        "10.42.0",
-                        "192.168.0",
-                        "192.168.1",
-                        "192.168.8"
-                    )
-                ).distinct()
+        val subnets =
+            (
+                getLocalSubnets() +
+                listOf(
+                    "10.142.142",
+                    "192.168.43",
+                    "192.168.42",
+                    "192.168.137",
+                    "192.168.225",
+                    "172.20.10",
+                    "10.42.0",
+                    "192.168.0",
+                    "192.168.1",
+                    "192.168.8"
+                )
+            ).distinct()
 
-            for (subnet in subnets) {
+        for (subnet in subnets) {
 
-                val tasks =
-                    (2..254).map { i ->
+            val tasks =
+                (2..254).map { i ->
+                    async(Dispatchers.IO) {
+                        val ip = "$subnet.$i"
 
-                        async(
-                            Dispatchers.IO
+                        if (
+                            isPortOpen(
+                                ip,
+                                7000,
+                                250
+                            )
                         ) {
-
-                            val ip =
-                                "$subnet.$i"
-
-                            if (
-                                isPortOpen(
-                                    ip,
-                                    7000,
-                                    250
-                                )
-                            ) {
-                                ip
-                            } else {
-                                null
-                            }
+                            ip
+                        } else {
+                            null
                         }
                     }
-
-                val found =
-                    tasks
-                        .awaitAll()
-                        .firstOrNull {
-                            it != null
-                        }
-
-                if (found != null) {
-                    return@coroutineScope found
                 }
-            }
 
-            null
+            val found =
+                tasks.awaitAll()
+                    .firstOrNull {
+                        it != null
+                    }
+
+            if (found != null) {
+                return@coroutineScope found
+            }
         }
+
+        null
+    }
 
     private fun getLocalSubnets():
         List<String> {
@@ -787,24 +774,19 @@ class CarrotMainScreen(carContext: CarContext) :
                         .getNetworkInterfaces()
                 )
 
-            for (
-                network in interfaces
-            ) {
+            for (network in interfaces) {
 
                 val addresses =
                     Collections.list(
                         network.inetAddresses
                     )
 
-                for (
-                    address in addresses
-                ) {
+                for (address in addresses) {
 
                     if (
                         !address.isLoopbackAddress &&
                         address is Inet4Address
                     ) {
-
                         val host =
                             address.hostAddress
                                 ?: continue
@@ -825,10 +807,8 @@ class CarrotMainScreen(carContext: CarContext) :
             }
 
         } catch (e: Exception) {
-
             log(
-                "Subnet: " +
-                e.localizedMessage
+                "Subnet=${e.localizedMessage}"
             )
         }
 
@@ -840,9 +820,7 @@ class CarrotMainScreen(carContext: CarContext) :
         port: Int,
         timeout: Int
     ): Boolean {
-
         return try {
-
             Socket().use {
                 it.connect(
                     InetSocketAddress(
@@ -860,27 +838,31 @@ class CarrotMainScreen(carContext: CarContext) :
         }
     }
 
-    /*
-     * PAN 액션을 Map Action Strip에 넣어
-     * Android Auto의 Surface interaction을 활성화.
-     */
-    override fun onGetTemplate():
-        Template {
+    private fun log(
+        message: String
+    ) {
+        runCatching {
+            File(
+                carContext.filesDir,
+                "carrot_crash.txt"
+            ).appendText(
+                "${java.util.Date()} $message\n"
+            )
+        }
+    }
+
+    override fun onGetTemplate(): Template {
 
         val mapActions =
             ActionStrip.Builder()
-                .addAction(
-                    Action.PAN
-                )
+                .addAction(Action.PAN)
                 .build()
 
-        val normalActions =
+        val actions =
             ActionStrip.Builder()
                 .addAction(
                     Action.Builder()
-                        .setTitle(
-                            "재시도"
-                        )
+                        .setTitle("재시도")
                         .setOnClickListener {
                             startStreamingPipeline()
                         }
@@ -888,14 +870,9 @@ class CarrotMainScreen(carContext: CarContext) :
                 )
                 .build()
 
-        return NavigationTemplate
-            .Builder()
-            .setMapActionStrip(
-                mapActions
-            )
-            .setActionStrip(
-                normalActions
-            )
+        return NavigationTemplate.Builder()
+            .setMapActionStrip(mapActions)
+            .setActionStrip(actions)
             .build()
     }
     }

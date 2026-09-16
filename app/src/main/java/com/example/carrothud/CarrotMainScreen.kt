@@ -10,9 +10,7 @@ import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
-import androidx.car.app.model.Action
-import androidx.car.app.model.ActionStrip
-import androidx.car.app.model.Template
+import androidx.car.app.model.*
 import androidx.car.app.navigation.NavigationManager
 import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
@@ -30,6 +28,7 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     private var streamJob: Job? = null
     private var webView: WebView? = null
     private val renderLock = Any()
+    private var lastErrorMessage: String? = null
 
     private var lastWidth = -1
     private var lastHeight = -1
@@ -44,7 +43,8 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
             carContext.getCarService(androidx.car.app.AppManager::class.java)
                 .setSurfaceCallback(this)
         }.onFailure { e ->
-            saveCustomLog("Init Exception: ${e.localizedMessage}")
+            lastErrorMessage = "Init Error: ${e.localizedMessage}"
+            saveCustomLog(lastErrorMessage!!)
         }
     }
 
@@ -55,8 +55,14 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
         }
         
         CoroutineScope(Dispatchers.Main).launch {
-            initWebView()
-            startStreamingPipeline()
+            try {
+                initWebView()
+                startStreamingPipeline()
+            } catch (e: Exception) {
+                lastErrorMessage = "Surface Error: ${e.localizedMessage}"
+                saveCustomLog(lastErrorMessage!!)
+                invalidate()
+            }
         }
     }
 
@@ -70,7 +76,8 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
 
     private fun initWebView() {
         if (webView == null) {
-            webView = WebView(carContext).apply {
+            // [핵심] CarContext 대신 applicationContext 사용하여 WebView 크래시 방지
+            webView = WebView(carContext.applicationContext).apply {
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 settings.apply {
                     javaScriptEnabled = true
@@ -78,13 +85,12 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                     mediaPlaybackRequiresUserGesture = false
                     useWideViewPort = true
                     loadWithOverviewMode = true
-                    textZoom = 100 // 좌측 하단 폰트 커졌다 작아지는 현상 고정
+                    textZoom = 100
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
                 webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
-                        // 터치 미작동 대응: '당근 비전 시작' 버튼 자동 클릭 스크립트
                         val autoStartScript = """
                             (function() {
                                 var attempts = 0;
@@ -147,7 +153,6 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 val width = if (container.width > 0) container.width else 1280
                 val height = if (container.height > 0) container.height else 720
 
-                // 화면 해상도가 실제로 변경되었을 때만 layout 계산 (폰트 깜빡임 방지)
                 if (width != lastWidth || height != lastHeight) {
                     lastWidth = width
                     lastHeight = height
@@ -269,17 +274,37 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
     }
 
     override fun onGetTemplate(): Template {
-        return NavigationTemplate.Builder()
-            .setActionStrip(
-                ActionStrip.Builder()
-                    .addAction(
-                        Action.Builder()
-                            .setTitle("재시도")
-                            .setOnClickListener { startStreamingPipeline() }
-                            .build()
-                    )
+        // 오류 발생 시 회색 오류 창 대신 차량 화면에 에러 내용을 직접 출력
+        if (lastErrorMessage != null) {
+            return PaneTemplate.Builder(
+                Pane.Builder()
+                    .addRow(Row.Builder().setTitle("오류 로그").addText(lastErrorMessage!!).build())
                     .build()
-            )
-            .build()
+            ).setTitle("당근HUD 실행 오류").build()
+        }
+
+        return try {
+            NavigationTemplate.Builder()
+                .setActionStrip(
+                    ActionStrip.Builder()
+                        .addAction(
+                            Action.Builder()
+                                .setTitle("재시도")
+                                .setOnClickListener {
+                                    lastErrorMessage = null
+                                    startStreamingPipeline()
+                                }
+                                .build()
+                        )
+                        .build()
+                )
+                .build()
+        } catch (e: Exception) {
+            PaneTemplate.Builder(
+                Pane.Builder()
+                    .addRow(Row.Builder().setTitle("템플릿 생성 실패").addText(e.localizedMessage ?: "알 수 없는 에러").build())
+                    .build()
+            ).setTitle("당근HUD 실행 오류").build()
+        }
     }
 }

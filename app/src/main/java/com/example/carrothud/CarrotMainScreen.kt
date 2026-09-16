@@ -42,8 +42,11 @@ class CarrotMainScreen(carContext: CarContext) :
     private var streamJob: Job? = null
     private var webView: WebView? = null
 
-    private var surfaceW = 0
-    private var surfaceH = 0
+    @Volatile
+    private var renderW = 0
+
+    @Volatile
+    private var renderH = 0
 
     @Volatile
     private var touchX = -1f
@@ -69,8 +72,6 @@ class CarrotMainScreen(carContext: CarContext) :
             carContext.getCarService(
                 androidx.car.app.AppManager::class.java
             ).setSurfaceCallback(this)
-        }.onFailure {
-            log("Init=${it.localizedMessage}")
         }
     }
 
@@ -79,17 +80,11 @@ class CarrotMainScreen(carContext: CarContext) :
     ) {
         surfaceContainer = container
         isRendering = true
-
-        surfaceW = 0
-        surfaceH = 0
-
-        log(
-            "Surface=${container.width}x${container.height}"
-        )
+        renderW = 0
+        renderH = 0
 
         CoroutineScope(Dispatchers.Main).launch {
             initWebView()
-            layoutWebView()
             startStreamingPipeline()
         }
     }
@@ -101,86 +96,81 @@ class CarrotMainScreen(carContext: CarContext) :
         streamJob?.cancel()
         streamJob = null
         surfaceContainer = null
-        surfaceW = 0
-        surfaceH = 0
+        renderW = 0
+        renderH = 0
     }
 
-    override fun onClick(
-        x: Float,
-        y: Float
-    ) {
+    override fun onClick(x: Float, y: Float) {
         val wv = webView ?: return
 
         touchX = x
         touchY = y
         touchUntil =
-            SystemClock.uptimeMillis() + 1000L
+            SystemClock.uptimeMillis() + 1000
 
-        log("CLICK=$x,$y")
-
-        val sw = surfaceW
-        val sh = surfaceH
+        val sw = renderW
+        val sh = renderH
 
         if (sw <= 0 || sh <= 0) return
 
-        val sx = sw / WEB_W.toFloat()
-        val sy = sh / WEB_H.toFloat()
+        val wx =
+            x / (sw / WEB_W.toFloat())
 
-        if (sx <= 0f || sy <= 0f) return
-
-        val wx = x / sx
-        val wy = y / sy
+        val wy =
+            y / (sh / WEB_H.toFloat())
 
         if (
-            wx < 0f ||
-            wx > WEB_W ||
-            wy < 0f ||
-            wy > WEB_H
+            wx !in 0f..WEB_W.toFloat() ||
+            wy !in 0f..WEB_H.toFloat()
         ) return
 
         wv.post {
             val now =
                 SystemClock.uptimeMillis()
 
-            val down =
-                MotionEvent.obtain(
-                    now,
-                    now,
-                    MotionEvent.ACTION_DOWN,
-                    wx,
-                    wy,
-                    0
-                )
+            val down = MotionEvent.obtain(
+                now,
+                now,
+                MotionEvent.ACTION_DOWN,
+                wx,
+                wy,
+                0
+            )
 
-            val up =
-                MotionEvent.obtain(
-                    now,
-                    now + 70L,
-                    MotionEvent.ACTION_UP,
-                    wx,
-                    wy,
-                    0
-                )
+            val up = MotionEvent.obtain(
+                now,
+                now + 60,
+                MotionEvent.ACTION_UP,
+                wx,
+                wy,
+                0
+            )
 
             try {
                 wv.dispatchTouchEvent(down)
                 wv.dispatchTouchEvent(up)
 
-                /*
-                 * 일반 MotionEvent로 안 먹는 요소를 위한
-                 * click() 보조 경로.
-                 */
-                val ix = wx.toInt()
-                val iy = wy.toInt()
-
                 val js =
                     "(function(){" +
-                    "var e=document.elementFromPoint($ix,$iy);" +
+                    "var x=${wx.toInt()}," +
+                    "y=${wy.toInt()};" +
+                    "var e=document.elementFromPoint(x,y);" +
                     "if(!e)return;" +
                     "var t=e.closest(" +
                     "'button,a,input,[role=\"button\"],[onclick]'" +
                     ")||e;" +
-                    "if(t&&t.click)t.click();" +
+                    "try{" +
+                    "t.dispatchEvent(new PointerEvent(" +
+                    "'pointerdown',{bubbles:true,clientX:x,clientY:y}));" +
+                    "t.dispatchEvent(new PointerEvent(" +
+                    "'pointerup',{bubbles:true,clientX:x,clientY:y}));" +
+                    "t.dispatchEvent(new MouseEvent(" +
+                    "'mousedown',{bubbles:true,clientX:x,clientY:y}));" +
+                    "t.dispatchEvent(new MouseEvent(" +
+                    "'mouseup',{bubbles:true,clientX:x,clientY:y}));" +
+                    "t.dispatchEvent(new MouseEvent(" +
+                    "'click',{bubbles:true,clientX:x,clientY:y}));" +
+                    "}catch(z){if(t.click)t.click();}" +
                     "})();"
 
                 wv.evaluateJavascript(js, null)
@@ -202,16 +192,10 @@ class CarrotMainScreen(carContext: CarContext) :
                 null
             )
 
-            isFocusable = true
-            isFocusableInTouchMode = true
-
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
-
-                mediaPlaybackRequiresUserGesture =
-                    false
-
+                mediaPlaybackRequiresUserGesture = false
                 useWideViewPort = true
                 loadWithOverviewMode = false
                 textZoom = 100
@@ -229,12 +213,14 @@ class CarrotMainScreen(carContext: CarContext) :
 
             webViewClient =
                 object : WebViewClient() {
-
                     override fun onPageFinished(
                         view: WebView?,
                         url: String?
                     ) {
-                        super.onPageFinished(view, url)
+                        super.onPageFinished(
+                            view,
+                            url
+                        )
 
                         fixDisplay(view)
                         autoStartVision(view)
@@ -248,11 +234,6 @@ class CarrotMainScreen(carContext: CarContext) :
 
     private fun layoutWebView() {
         val wv = webView ?: return
-
-        if (
-            wv.width == WEB_W &&
-            wv.height == WEB_H
-        ) return
 
         wv.measure(
             View.MeasureSpec.makeMeasureSpec(
@@ -273,99 +254,56 @@ class CarrotMainScreen(carContext: CarContext) :
         )
     }
 
-    /*
-     * 당근 웹 UI의 논리 화면은 계속 1280x720.
-     * 화질 개선 때문에 UI 크기를 바꾸지 않는다.
-     */
-    private fun fixDisplay(
-        view: WebView?
-    ) {
+    private fun fixDisplay(view: WebView?) {
         val js =
             "(function(){" +
-            "if(window.__aaLayoutFix)return;" +
-            "window.__aaLayoutFix=true;" +
-
-            "function fix(){" +
-            "var d=document.documentElement;" +
-            "d.style.webkitTextSizeAdjust='100%';" +
-            "d.style.width='1280px';" +
-            "d.style.height='720px';" +
-            "d.style.minWidth='1280px';" +
-            "d.style.maxWidth='1280px';" +
-            "d.style.minHeight='720px';" +
-            "d.style.maxHeight='720px';" +
-            "d.style.margin='0';" +
-            "d.style.padding='0';" +
-            "d.style.overflow='hidden';" +
-
-            "if(document.body){" +
-            "var b=document.body;" +
-            "b.style.webkitTextSizeAdjust='100%';" +
-            "b.style.width='1280px';" +
-            "b.style.height='720px';" +
-            "b.style.minWidth='1280px';" +
-            "b.style.maxWidth='1280px';" +
-            "b.style.minHeight='720px';" +
-            "b.style.maxHeight='720px';" +
-            "b.style.margin='0';" +
-            "b.style.padding='0';" +
-            "b.style.overflow='hidden';" +
-            "}" +
-
-            "var m=document.querySelector(" +
-            "'meta[name=\"viewport\"]');" +
-
+            "var m=document.querySelector('meta[name=\"viewport\"]');" +
             "if(!m){" +
             "m=document.createElement('meta');" +
             "m.name='viewport';" +
             "document.head.appendChild(m);" +
             "}" +
-
             "m.content=" +
             "'width=1280,height=720," +
-            "initial-scale=1," +
-            "minimum-scale=1," +
-            "maximum-scale=1," +
-            "user-scalable=no';" +
-
-            "window.scrollTo(0,0);" +
-            "}" +
-
-            "fix();" +
-
-            /*
-             * 웹쪽 코드가 나중에 viewport/style을
-             * 변경하는 경우 다시 원상복구.
-             */
-            "setInterval(fix,1000);" +
+            "initial-scale=1,maximum-scale=1,user-scalable=no';" +
+            "var s=document.createElement('style');" +
+            "s.id='aaFixedLayout';" +
+            "s.textContent=" +
+            "'html,body{" +
+            "width:1280px!important;" +
+            "height:720px!important;" +
+            "min-width:1280px!important;" +
+            "max-width:1280px!important;" +
+            "min-height:720px!important;" +
+            "max-height:720px!important;" +
+            "margin:0!important;" +
+            "padding:0!important;" +
+            "overflow:hidden!important;" +
+            "-webkit-text-size-adjust:100%!important;" +
+            "}' +" +
+            "'*,*::before,*::after{" +
+            "animation-duration:0s!important;" +
+            "transition-duration:0s!important;" +
+            "}';" +
+            "document.head.appendChild(s);" +
             "})();"
 
         view?.evaluateJavascript(js, null)
     }
 
-    private fun autoStartVision(
-        view: WebView?
-    ) {
+    private fun autoStartVision(view: WebView?) {
         val js =
             "(function(){" +
             "var n=0;" +
             "var z=setInterval(function(){" +
             "n++;" +
-
             "var a=document.getElementsByTagName('*');" +
-
             "for(var i=0;i<a.length;i++){" +
             "var e=a[i];" +
             "var t=(e.innerText||e.textContent||'').trim();" +
-
-            "if(" +
-            "t.indexOf('당근 비전 시작')!==-1||" +
-            "t.indexOf('비전 시작')!==-1" +
-            "){" +
-            "e.click();" +
+            "if(t.indexOf('당근 비전 시작')!==-1||" +
+            "t.indexOf('비전 시작')!==-1)e.click();" +
             "}" +
-            "}" +
-
             "if(n>20)clearInterval(z);" +
             "},500);" +
             "})();"
@@ -373,16 +311,7 @@ class CarrotMainScreen(carContext: CarContext) :
         view?.evaluateJavascript(js, null)
     }
 
-    /*
-     * 성공한 카메라 방식 유지.
-     *
-     * 차이점:
-     * CSS 크기는 그대로 두고
-     * canvas 내부 픽셀만 고밀도로 만든다.
-     */
-    private fun installVideoMirror(
-        view: WebView?
-    ) {
+    private fun installVideoMirror(view: WebView?) {
         val js =
             "(function(){" +
             "if(window.__carrotAaMirror)return;" +
@@ -390,25 +319,16 @@ class CarrotMainScreen(carContext: CarContext) :
 
             "function start(){" +
             "var v=document.getElementById('carrotRoadVideo');" +
+            "if(!v){setTimeout(start,500);return;}" +
 
-            "if(!v){" +
-            "setTimeout(start,500);" +
-            "return;" +
-            "}" +
+            "var p=v.parentElement;" +
+            "if(!p){setTimeout(start,500);return;}" +
 
             "if(document.getElementById(" +
             "'carrotAaVideoMirror'))return;" +
 
-            "var p=v.parentElement;" +
-
-            "if(!p){" +
-            "setTimeout(start,500);" +
-            "return;" +
-            "}" +
-
             "var c=document.createElement('canvas');" +
             "c.id='carrotAaVideoMirror';" +
-
             "c.style.position='absolute';" +
             "c.style.left='0';" +
             "c.style.top='0';" +
@@ -416,39 +336,23 @@ class CarrotMainScreen(carContext: CarContext) :
             "c.style.height='100%';" +
             "c.style.zIndex='0';" +
             "c.style.pointerEvents='none';" +
-            "c.style.background='#000';" +
 
             "p.insertBefore(c,v);" +
             "v.style.visibility='hidden';" +
 
-            "var ctx=c.getContext(" +
-            "'2d',{alpha:false});" +
+            "var ctx=c.getContext('2d',{alpha:false});" +
 
             "function draw(){" +
-
             "if(v.videoWidth>0&&v.videoHeight>0){" +
 
             "var cw=p.clientWidth||1280;" +
             "var ch=p.clientHeight||720;" +
 
-            /*
-             * 최대 2배.
-             * 단 원본 비디오보다 터무니없이
-             * 큰 canvas를 만들지는 않는다.
-             */
-            "var q=2;" +
+            "var q=Math.min(2," +
+            "Math.max(1,v.videoWidth/cw));" +
 
             "var bw=Math.round(cw*q);" +
             "var bh=Math.round(ch*q);" +
-
-            "var maxW=Math.max(v.videoWidth,cw);" +
-            "var maxH=Math.max(v.videoHeight,ch);" +
-
-            "bw=Math.min(bw,maxW);" +
-            "bh=Math.min(bh,maxH);" +
-
-            "bw=Math.max(bw,Math.round(cw));" +
-            "bh=Math.max(bh,Math.round(ch));" +
 
             "if(c.width!==bw)c.width=bw;" +
             "if(c.height!==bh)c.height=bh;" +
@@ -456,27 +360,20 @@ class CarrotMainScreen(carContext: CarContext) :
             "var vw=v.videoWidth;" +
             "var vh=v.videoHeight;" +
 
-            /*
-             * 실제 canvas pixel 기준 cover.
-             */
-            "var s=Math.max(bw/vw,bh/vh);" +
+            "var scale=Math.max(" +
+            "bw/vw,bh/vh);" +
 
-            "var dw=vw*s;" +
-            "var dh=vh*s;" +
+            "var dw=vw*scale;" +
+            "var dh=vh*scale;" +
             "var dx=(bw-dw)/2;" +
             "var dy=(bh-dh)/2;" +
 
             "try{" +
             "ctx.imageSmoothingEnabled=true;" +
             "ctx.imageSmoothingQuality='high';" +
-
             "ctx.fillStyle='#000';" +
             "ctx.fillRect(0,0,bw,bh);" +
-
-            "ctx.drawImage(" +
-            "v,dx,dy,dw,dh" +
-            ");" +
-
+            "ctx.drawImage(v,dx,dy,dw,dh);" +
             "}catch(e){}" +
             "}" +
 
@@ -516,12 +413,6 @@ class CarrotMainScreen(carContext: CarContext) :
                     return@launch
                 }
 
-                log("Comma=$ip")
-
-                drawMessage(
-                    "영상 스트리밍 연결 중..."
-                )
-
                 withContext(Dispatchers.Main) {
                     layoutWebView()
 
@@ -551,14 +442,9 @@ class CarrotMainScreen(carContext: CarContext) :
                     webView
                         ?: return@withContext
 
-                if (
-                    !surface.isValid ||
-                    !isRendering
-                ) {
+                if (!surface.isValid) {
                     return@withContext
                 }
-
-                layoutWebView()
 
                 var canvas:
                     android.graphics.Canvas? = null
@@ -571,56 +457,29 @@ class CarrotMainScreen(carContext: CarContext) :
 
                         canvas.drawColor(Color.BLACK)
 
-                        /*
-                         * 첫 정상 프레임에서만
-                         * Android Auto Surface 크기를 잡는다.
-                         */
-                        if (
-                            surfaceW <= 0 ||
-                            surfaceH <= 0
-                        ) {
-                            surfaceW = canvas.width
-                            surfaceH = canvas.height
-
-                            log(
-                                "RenderSurface=" +
-                                "${surfaceW}x${surfaceH}"
-                            )
-                        }
+                        renderW = canvas.width
+                        renderH = canvas.height
 
                         val sx =
-                            surfaceW /
+                            renderW /
                                 WEB_W.toFloat()
 
                         val sy =
-                            surfaceH /
+                            renderH /
                                 WEB_H.toFloat()
 
                         canvas.save()
-
-                        /*
-                         * 잘라내지 않고 Surface에 맞춤.
-                         * 1280x720 UI 전체가 항상 남는다.
-                         */
                         canvas.scale(sx, sy)
-
                         wv.draw(canvas)
-
                         canvas.restore()
 
-                        /*
-                         * SurfaceCallback.onClick이
-                         * 실제로 들어오면 빨간점.
-                         */
                         if (
                             SystemClock.uptimeMillis() <
                             touchUntil
                         ) {
-                            val paint =
+                            val p =
                                 Paint().apply {
                                     color = Color.RED
-                                    style =
-                                        Paint.Style.FILL
                                     isAntiAlias = true
                                 }
 
@@ -628,15 +487,10 @@ class CarrotMainScreen(carContext: CarContext) :
                                 touchX,
                                 touchY,
                                 28f,
-                                paint
+                                p
                             )
                         }
                     }
-
-                } catch (e: Throwable) {
-                    log(
-                        "Render=${e.localizedMessage}"
-                    )
 
                 } finally {
                     if (canvas != null) {
@@ -653,16 +507,11 @@ class CarrotMainScreen(carContext: CarContext) :
         }
     }
 
-    private fun drawMessage(
-        message: String
-    ) {
+    private fun drawMessage(message: String) {
         val c = surfaceContainer ?: return
         val surface = c.surface ?: return
 
-        if (
-            !surface.isValid ||
-            !isRendering
-        ) return
+        if (!surface.isValid) return
 
         var canvas:
             android.graphics.Canvas? = null
@@ -670,10 +519,10 @@ class CarrotMainScreen(carContext: CarContext) :
         try {
             canvas = surface.lockCanvas(null)
 
-            if (canvas != null) {
-                canvas.drawColor(Color.BLACK)
+            canvas?.let {
+                it.drawColor(Color.BLACK)
 
-                val paint =
+                val p =
                     Paint().apply {
                         color = Color.WHITE
                         textSize = 32f
@@ -682,18 +531,13 @@ class CarrotMainScreen(carContext: CarContext) :
                         isAntiAlias = true
                     }
 
-                canvas.drawText(
+                it.drawText(
                     message,
-                    canvas.width / 2f,
-                    canvas.height / 2f,
-                    paint
+                    it.width / 2f,
+                    it.height / 2f,
+                    p
                 )
             }
-
-        } catch (e: Throwable) {
-            log(
-                "Message=${e.localizedMessage}"
-            )
 
         } finally {
             if (canvas != null) {
@@ -728,7 +572,7 @@ class CarrotMainScreen(carContext: CarContext) :
 
         for (subnet in subnets) {
 
-            val tasks =
+            val jobs =
                 (2..254).map { i ->
                     async(Dispatchers.IO) {
                         val ip = "$subnet.$i"
@@ -739,16 +583,12 @@ class CarrotMainScreen(carContext: CarContext) :
                                 7000,
                                 250
                             )
-                        ) {
-                            ip
-                        } else {
-                            null
-                        }
+                        ) ip else null
                     }
                 }
 
             val found =
-                tasks.awaitAll()
+                jobs.awaitAll()
                     .firstOrNull {
                         it != null
                     }
@@ -767,7 +607,7 @@ class CarrotMainScreen(carContext: CarContext) :
         val result =
             mutableListOf<String>()
 
-        try {
+        runCatching {
             val interfaces =
                 Collections.list(
                     NetworkInterface
@@ -775,14 +615,12 @@ class CarrotMainScreen(carContext: CarContext) :
                 )
 
             for (network in interfaces) {
-
-                val addresses =
+                for (
+                    address in
                     Collections.list(
                         network.inetAddresses
                     )
-
-                for (address in addresses) {
-
+                ) {
                     if (
                         !address.isLoopbackAddress &&
                         address is Inet4Address
@@ -805,11 +643,6 @@ class CarrotMainScreen(carContext: CarContext) :
                     }
                 }
             }
-
-        } catch (e: Exception) {
-            log(
-                "Subnet=${e.localizedMessage}"
-            )
         }
 
         return result.distinct()
@@ -830,49 +663,31 @@ class CarrotMainScreen(carContext: CarContext) :
                     timeout
                 )
             }
-
             true
-
         } catch (_: Exception) {
             false
         }
     }
 
-    private fun log(
-        message: String
-    ) {
-        runCatching {
-            File(
-                carContext.filesDir,
-                "carrot_crash.txt"
-            ).appendText(
-                "${java.util.Date()} $message\n"
-            )
-        }
-    }
-
     override fun onGetTemplate(): Template {
-
-        val mapActions =
-            ActionStrip.Builder()
-                .addAction(Action.PAN)
-                .build()
-
-        val actions =
-            ActionStrip.Builder()
-                .addAction(
-                    Action.Builder()
-                        .setTitle("재시도")
-                        .setOnClickListener {
-                            startStreamingPipeline()
-                        }
-                        .build()
-                )
-                .build()
-
         return NavigationTemplate.Builder()
-            .setMapActionStrip(mapActions)
-            .setActionStrip(actions)
+            .setMapActionStrip(
+                ActionStrip.Builder()
+                    .addAction(Action.PAN)
+                    .build()
+            )
+            .setActionStrip(
+                ActionStrip.Builder()
+                    .addAction(
+                        Action.Builder()
+                            .setTitle("재시도")
+                            .setOnClickListener {
+                                startStreamingPipeline()
+                            }
+                            .build()
+                    )
+                    .build()
+            )
             .build()
     }
-    }
+}

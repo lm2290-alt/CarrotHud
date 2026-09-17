@@ -3,10 +3,13 @@ package com.example.carrothud
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.os.SystemClock
@@ -85,6 +88,8 @@ class CarrotMainScreen(
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val egoVehicleBitmap =
         BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_ev)
+    private val roadBackgroundBitmap =
+        BitmapFactory.decodeResource(carContext.resources, R.drawable.tesla_road_background)
 
     init {
         runCatching {
@@ -485,7 +490,7 @@ class CarrotMainScreen(
 
             val s = state
 
-            canvas.drawColor(Color.rgb(232, 231, 226))
+            drawRoadBackground(canvas, width, height)
 
             drawRoad(
                 canvas,
@@ -526,6 +531,30 @@ class CarrotMainScreen(
         }
     }
 
+    /** Center-crops instead of stretching so wide OEM navigation surfaces keep correct proportions. */
+    private fun drawRoadBackground(canvas: Canvas, width: Float, height: Float) {
+        val bitmap = roadBackgroundBitmap
+        if (bitmap == null) {
+            canvas.drawColor(Color.rgb(232, 231, 226))
+            return
+        }
+
+        val targetRatio = width / height
+        val bitmapRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
+        val source = if (bitmapRatio > targetRatio) {
+            val sourceWidth = (bitmap.height * targetRatio).toInt()
+            val left = (bitmap.width - sourceWidth) / 2
+            Rect(left, 0, left + sourceWidth, bitmap.height)
+        } else {
+            val sourceHeight = (bitmap.width / targetRatio).toInt()
+            val top = (bitmap.height - sourceHeight) / 2
+            Rect(0, top, bitmap.width, top + sourceHeight)
+        }
+        paint.alpha = 255
+        paint.colorFilter = null
+        canvas.drawBitmap(bitmap, source, RectF(0f, 0f, width, height), paint)
+    }
+
     private fun drawRoad(
         canvas: Canvas,
         width: Float,
@@ -535,28 +564,6 @@ class CarrotMainScreen(
         val horizon = height * 0.18f
         val bottom = height * 1.03f
         val center = width * 0.5f
-
-        paint.style = Paint.Style.FILL
-        paint.shader = LinearGradient(
-            0f,
-            horizon,
-            0f,
-            bottom,
-            Color.rgb(224, 224, 220),
-            Color.rgb(194, 197, 196),
-            Shader.TileMode.CLAMP
-        )
-
-        val road = Path().apply {
-            moveTo(center - width * 0.07f, horizon)
-            lineTo(center + width * 0.07f, horizon)
-            lineTo(center + width * 0.46f, bottom)
-            lineTo(center - width * 0.46f, bottom)
-            close()
-        }
-
-        canvas.drawPath(road, paint)
-        paint.shader = null
 
         if (s.pathX.size > 2 && s.pathY.size > 2) {
             drawDrivingCorridor(canvas, s.pathX, s.pathY, width, height, s.enabled)
@@ -738,14 +745,14 @@ class CarrotMainScreen(
         s: HudState
     ) {
         val cx = width * 0.5f
-        val cy = height * 0.82f
+        val cy = height * 0.73f
         val blinkOn = (SystemClock.uptimeMillis() / 450L) % 2L == 0L
         drawTopDownCar(
             canvas,
             cx,
             cy,
-            width * 0.076f,
-            height * 0.15f,
+            width * 0.115f,
+            height * 0.23f,
             true,
             s.enabled,
             s.leftBlinker && blinkOn,
@@ -764,19 +771,27 @@ class CarrotMainScreen(
         leftBlinker: Boolean = false,
         rightBlinker: Boolean = false
     ) {
-        if (ego && egoVehicleBitmap != null) {
+        if (egoVehicleBitmap != null) {
+            // The source sprite is 300x452. Compute width from height to avoid OEM-wide-screen squash.
+            val drawnHeight = carH
+            val drawnWidth = drawnHeight * egoVehicleBitmap.width / egoVehicleBitmap.height
             val destination = RectF(
-                cx - carW * 0.72f,
-                cy - carH * 0.62f,
-                cx + carW * 0.72f,
-                cy + carH * 0.62f
+                cx - drawnWidth / 2f,
+                cy - drawnHeight / 2f,
+                cx + drawnWidth / 2f,
+                cy + drawnHeight / 2f
             )
-            paint.alpha = 255
-            paint.setShadowLayer(carW * 0.22f, 0f, carW * 0.10f, Color.argb(80, 0, 0, 0))
+            paint.alpha = if (ego) 255 else 205
+            paint.colorFilter = if (ego) null else ColorMatrixColorFilter(
+                ColorMatrix().apply { setSaturation(0f) }
+            )
+            paint.setShadowLayer(drawnWidth * 0.20f, 0f, drawnWidth * 0.08f, Color.argb(75, 0, 0, 0))
             canvas.drawBitmap(egoVehicleBitmap, null, destination, paint)
             paint.clearShadowLayer()
+            paint.colorFilter = null
+            paint.alpha = 255
             if (leftBlinker || rightBlinker) {
-                drawVehicleBlinkers(canvas, cx, cy, carW, carH, leftBlinker, rightBlinker)
+                drawVehicleBlinkers(canvas, cx, cy, drawnWidth, drawnHeight, leftBlinker, rightBlinker)
             }
             return
         }
@@ -821,13 +836,13 @@ class CarrotMainScreen(
         paint.setShadowLayer(carW * 0.22f, 0f, 0f, Color.argb(210, 255, 171, 24))
         if (leftBlinker) {
             canvas.drawOval(
-                RectF(cx - carW * 0.67f, cy - carH * 0.35f, cx - carW * 0.42f, cy - carH * 0.23f),
+                RectF(cx - carW * 0.43f, cy + carH * 0.26f, cx - carW * 0.17f, cy + carH * 0.33f),
                 paint
             )
         }
         if (rightBlinker) {
             canvas.drawOval(
-                RectF(cx + carW * 0.42f, cy - carH * 0.35f, cx + carW * 0.67f, cy - carH * 0.23f),
+                RectF(cx + carW * 0.17f, cy + carH * 0.26f, cx + carW * 0.43f, cy + carH * 0.33f),
                 paint
             )
         }
@@ -842,10 +857,12 @@ class CarrotMainScreen(
     ) {
         val d = s.leadDistance ?: return
 
-        val point = projectWorld(d.coerceIn(4f, 120f), 0f, width, height) ?: return
+        // Perspective correction: the previous mapping made a 29 m lead overlap the ego car.
+        val visualDistance = (d * 1.75f).coerceIn(8f, 120f)
+        val point = projectWorld(visualDistance, 0f, width, height) ?: return
         val normalized = (d / 120f).coerceIn(0.05f, 1f)
-        val carW = width * (0.065f - normalized * 0.032f)
-        val carH = carW * 1.75f
+        val carH = height * (0.13f - normalized * 0.045f)
+        val carW = carH * egoVehicleBitmap.width / egoVehicleBitmap.height
         drawTopDownCar(canvas, point.x, point.y, carW, carH, false)
     }
 

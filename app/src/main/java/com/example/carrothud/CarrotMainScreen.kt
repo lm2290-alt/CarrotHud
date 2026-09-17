@@ -1,9 +1,15 @@
 package com.example.carrothud
 
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PointF
+import android.graphics.RectF
+import android.graphics.Shader
+import android.os.SystemClock
 import android.util.Log
 import androidx.car.app.AppManager
 import androidx.car.app.CarContext
@@ -44,6 +50,8 @@ class CarrotMainScreen(
         val enabled: Boolean = false,
         val leadDistance: Float? = null,
         val leadRelSpeed: Float = 0f,
+        val leftBlinker: Boolean = false,
+        val rightBlinker: Boolean = false,
         val pathX: FloatArray = floatArrayOf(),
         val pathY: FloatArray = floatArrayOf(),
         val laneLines: List<Pair<FloatArray, FloatArray>> = emptyList(),
@@ -75,6 +83,8 @@ class CarrotMainScreen(
         .build()
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val egoVehicleBitmap =
+        BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_ev)
 
     init {
         runCatching {
@@ -314,6 +324,21 @@ class CarrotMainScreen(
         val cluster = c.f32()
         val cruise = c.f32()
 
+        c.f32() // steeringAngleDeg
+        c.bool() // brakeHoldActive
+        c.i16() // softHoldActive
+        c.i16() // carrotCruise
+        c.i16() // gearStep
+        c.f32() // useLaneLineSpeed
+        c.bool() // brakeLights
+        c.bool() // leftBlindspot
+        c.bool() // rightBlindspot
+        c.i16() // leftLaneLine
+        c.i16() // rightLaneLine
+        c.u8() // gearShifter enum
+        val leftBlinker = c.bool()
+        val rightBlinker = c.bool()
+
         val speedMps =
             if (cluster > 0.01f) cluster else vEgo
 
@@ -325,6 +350,8 @@ class CarrotMainScreen(
             speedKph = speedKph,
             // vCruiseCluster is already km/h. Multiplying by 3.6 caused 60 -> 216.
             cruiseKph = cruiseKph,
+            leftBlinker = leftBlinker,
+            rightBlinker = rightBlinker,
             connected = true
         )
     }
@@ -458,7 +485,7 @@ class CarrotMainScreen(
 
             val s = state
 
-            canvas.drawColor(Color.rgb(4, 6, 8))
+            canvas.drawColor(Color.rgb(232, 231, 226))
 
             drawRoad(
                 canvas,
@@ -505,34 +532,43 @@ class CarrotMainScreen(
         height: Float,
         s: HudState
     ) {
-        val horizon = height * 0.23f
-        val bottom = height * 1.02f
+        val horizon = height * 0.18f
+        val bottom = height * 1.03f
         val center = width * 0.5f
 
         paint.style = Paint.Style.FILL
-        paint.color = Color.rgb(12, 15, 18)
+        paint.shader = LinearGradient(
+            0f,
+            horizon,
+            0f,
+            bottom,
+            Color.rgb(224, 224, 220),
+            Color.rgb(194, 197, 196),
+            Shader.TileMode.CLAMP
+        )
 
         val road = Path().apply {
-            moveTo(center - width * 0.055f, horizon)
-            lineTo(center + width * 0.055f, horizon)
-            lineTo(center + width * 0.42f, bottom)
-            lineTo(center - width * 0.42f, bottom)
+            moveTo(center - width * 0.07f, horizon)
+            lineTo(center + width * 0.07f, horizon)
+            lineTo(center + width * 0.46f, bottom)
+            lineTo(center - width * 0.46f, bottom)
             close()
         }
 
         canvas.drawPath(road, paint)
+        paint.shader = null
+
+        if (s.pathX.size > 2 && s.pathY.size > 2) {
+            drawDrivingCorridor(canvas, s.pathX, s.pathY, width, height, s.enabled)
+        }
 
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = max(2f, width * 0.003f)
+        paint.strokeWidth = max(3f, width * 0.004f)
         paint.strokeCap = Paint.Cap.ROUND
 
         if (s.laneLines.isNotEmpty()) {
-            s.laneLines.forEachIndexed { index, lane ->
-                paint.color =
-                    if (index == 1 || index == 2)
-                        Color.WHITE
-                    else
-                        Color.rgb(100, 110, 120)
+            s.laneLines.forEach { lane ->
+                paint.color = Color.rgb(15, 112, 225)
 
                 drawWorldLine(
                     canvas,
@@ -544,7 +580,7 @@ class CarrotMainScreen(
                 )
             }
         } else {
-            paint.color = Color.rgb(110, 120, 130)
+            paint.color = Color.rgb(15, 112, 225)
 
             drawFallbackLane(
                 canvas,
@@ -565,35 +601,56 @@ class CarrotMainScreen(
             )
         }
 
-        if (
-            s.pathX.size > 2 &&
-            s.pathY.size > 2
-        ) {
-            paint.color =
-                if (s.enabled)
-                    Color.rgb(40, 220, 110)
-                else
-                    Color.rgb(90, 100, 110)
-
-            paint.strokeWidth =
-                max(5f, width * 0.010f)
-
-            drawWorldLine(
-                canvas,
-                s.pathX,
-                s.pathY,
-                width,
-                height,
-                paint
-            )
-        }
-
         drawEgoCar(
             canvas,
             width,
             height,
-            s.enabled
+            s
         )
+    }
+
+    private fun drawDrivingCorridor(
+        canvas: Canvas,
+        xs: FloatArray,
+        ys: FloatArray,
+        width: Float,
+        height: Float,
+        enabled: Boolean
+    ) {
+        val n = min(xs.size, ys.size)
+        if (n < 2) return
+
+        val left = mutableListOf<PointF>()
+        val right = mutableListOf<PointF>()
+
+        for (i in 0 until n) {
+            val forward = xs[i]
+            if (forward !in 0f..120f) continue
+            projectWorld(forward, ys[i] - 1.25f, width, height)?.let(left::add)
+            projectWorld(forward, ys[i] + 1.25f, width, height)?.let(right::add)
+        }
+
+        if (left.size < 2 || right.size < 2) return
+
+        val corridor = Path().apply {
+            moveTo(left.first().x, left.first().y)
+            left.drop(1).forEach { lineTo(it.x, it.y) }
+            right.asReversed().forEach { lineTo(it.x, it.y) }
+            close()
+        }
+
+        paint.style = Paint.Style.FILL
+        paint.shader = LinearGradient(
+            width * 0.5f,
+            height * 0.88f,
+            width * 0.5f,
+            height * 0.28f,
+            if (enabled) Color.argb(220, 77, 232, 95) else Color.argb(145, 120, 130, 136),
+            if (enabled) Color.argb(70, 38, 183, 235) else Color.argb(25, 120, 130, 136),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawPath(corridor, paint)
+        paint.shader = null
     }
 
     private fun drawFallbackLane(
@@ -636,23 +693,9 @@ class CarrotMainScreen(
                 forward > 120f
             ) continue
 
-            val depth =
-                (forward / 120f)
-                    .coerceIn(0f, 1f)
-
-            val screenY =
-                height * 0.90f -
-                depth * height * 0.66f
-
-            val perspective =
-                1f - depth * 0.80f
-
-            val screenX =
-                width * 0.5f +
-                ys[i] *
-                width *
-                0.060f *
-                perspective
+            val point = projectWorld(forward, ys[i], width, height) ?: continue
+            val screenX = point.x
+            val screenY = point.y
 
             if (!started) {
                 path.moveTo(
@@ -673,46 +716,145 @@ class CarrotMainScreen(
         }
     }
 
+    private fun projectWorld(
+        forward: Float,
+        lateral: Float,
+        width: Float,
+        height: Float
+    ): PointF? {
+        if (!forward.isFinite() || !lateral.isFinite() || forward !in 0f..120f) return null
+        val depth = (forward / 120f).coerceIn(0f, 1f)
+        val curvedDepth = kotlin.math.sqrt(depth)
+        val screenY = height * 0.90f - curvedDepth * height * 0.70f
+        val perspective = 1f - curvedDepth * 0.82f
+        val screenX = width * 0.5f + lateral * width * 0.060f * perspective
+        return PointF(screenX, screenY)
+    }
+
     private fun drawEgoCar(
         canvas: Canvas,
         width: Float,
         height: Float,
-        enabled: Boolean
+        s: HudState
     ) {
         val cx = width * 0.5f
         val cy = height * 0.82f
+        val blinkOn = (SystemClock.uptimeMillis() / 450L) % 2L == 0L
+        drawTopDownCar(
+            canvas,
+            cx,
+            cy,
+            width * 0.076f,
+            height * 0.15f,
+            true,
+            s.enabled,
+            s.leftBlinker && blinkOn,
+            s.rightBlinker && blinkOn
+        )
+    }
 
-        val carW = width * 0.055f
-        val carH = height * 0.095f
+    private fun drawTopDownCar(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        carW: Float,
+        carH: Float,
+        ego: Boolean,
+        enabled: Boolean = false,
+        leftBlinker: Boolean = false,
+        rightBlinker: Boolean = false
+    ) {
+        if (ego && egoVehicleBitmap != null) {
+            val destination = RectF(
+                cx - carW * 0.72f,
+                cy - carH * 0.62f,
+                cx + carW * 0.72f,
+                cy + carH * 0.62f
+            )
+            paint.alpha = 255
+            paint.setShadowLayer(carW * 0.22f, 0f, carW * 0.10f, Color.argb(80, 0, 0, 0))
+            canvas.drawBitmap(egoVehicleBitmap, null, destination, paint)
+            paint.clearShadowLayer()
+            if (leftBlinker || rightBlinker) {
+                drawVehicleBlinkers(canvas, cx, cy, carW, carH, leftBlinker, rightBlinker)
+            }
+            return
+        }
 
         paint.style = Paint.Style.FILL
-        paint.color =
-            if (enabled)
-                Color.rgb(38, 220, 105)
-            else
-                Color.rgb(210, 215, 220)
-
+        paint.setShadowLayer(carW * 0.22f, 0f, carW * 0.10f, Color.argb(90, 0, 0, 0))
+        paint.color = if (ego) Color.rgb(27, 30, 32) else Color.rgb(132, 136, 137)
         canvas.drawRoundRect(
-            cx - carW / 2f,
-            cy - carH / 2f,
-            cx + carW / 2f,
-            cy + carH / 2f,
-            carW * 0.25f,
-            carW * 0.25f,
+            RectF(cx - carW / 2f, cy - carH / 2f, cx + carW / 2f, cy + carH / 2f),
+            carW * 0.30f,
+            carW * 0.30f,
+            paint
+        )
+        paint.clearShadowLayer()
+
+        paint.color = if (ego) Color.rgb(73, 80, 84) else Color.rgb(191, 195, 194)
+        canvas.drawRoundRect(
+            RectF(cx - carW * 0.33f, cy - carH * 0.23f, cx + carW * 0.33f, cy + carH * 0.15f),
+            carW * 0.14f,
+            carW * 0.14f,
             paint
         )
 
-        paint.color = Color.rgb(25, 30, 34)
+        paint.color = if (enabled && ego) Color.rgb(68, 235, 106) else Color.rgb(210, 48, 43)
+        val lightW = carW * 0.14f
+        canvas.drawRoundRect(RectF(cx - carW * 0.34f, cy - carH * 0.43f, cx - carW * 0.34f + lightW, cy - carH * 0.39f), lightW, lightW, paint)
+        canvas.drawRoundRect(RectF(cx + carW * 0.34f - lightW, cy - carH * 0.43f, cx + carW * 0.34f, cy - carH * 0.39f), lightW, lightW, paint)
 
-        canvas.drawRoundRect(
-            cx - carW * 0.28f,
-            cy - carH * 0.25f,
-            cx + carW * 0.28f,
-            cy + carH * 0.05f,
-            carW * 0.10f,
-            carW * 0.10f,
-            paint
-        )
+    }
+
+    private fun drawVehicleBlinkers(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        carW: Float,
+        carH: Float,
+        leftBlinker: Boolean,
+        rightBlinker: Boolean
+    ) {
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(255, 171, 24)
+        paint.setShadowLayer(carW * 0.22f, 0f, 0f, Color.argb(210, 255, 171, 24))
+        if (leftBlinker) {
+            canvas.drawOval(
+                RectF(cx - carW * 0.67f, cy - carH * 0.35f, cx - carW * 0.42f, cy - carH * 0.23f),
+                paint
+            )
+            drawTurnArrow(canvas, cx - carW * 1.05f, cy, carW * 0.34f, true)
+        }
+        if (rightBlinker) {
+            canvas.drawOval(
+                RectF(cx + carW * 0.42f, cy - carH * 0.35f, cx + carW * 0.67f, cy - carH * 0.23f),
+                paint
+            )
+            drawTurnArrow(canvas, cx + carW * 1.05f, cy, carW * 0.34f, false)
+        }
+        paint.clearShadowLayer()
+    }
+
+    private fun drawTurnArrow(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        size: Float,
+        pointsLeft: Boolean
+    ) {
+        val direction = if (pointsLeft) -1f else 1f
+        val arrow = Path().apply {
+            moveTo(cx + direction * size, cy - size * 0.62f)
+            lineTo(cx, cy)
+            lineTo(cx + direction * size, cy + size * 0.62f)
+            lineTo(cx + direction * size, cy + size * 0.22f)
+            lineTo(cx - direction * size * 0.78f, cy + size * 0.22f)
+            lineTo(cx - direction * size * 0.78f, cy - size * 0.22f)
+            lineTo(cx + direction * size, cy - size * 0.22f)
+            close()
+        }
+        canvas.drawPath(arrow, paint)
     }
 
     private fun drawLead(
@@ -723,48 +865,11 @@ class CarrotMainScreen(
     ) {
         val d = s.leadDistance ?: return
 
-        val normalized =
-            (d / 120f)
-                .coerceIn(0.05f, 1f)
-
-        val y =
-            height * 0.76f -
-            normalized * height * 0.48f
-
-        val size =
-            width *
-            (0.055f - normalized * 0.025f)
-
-        val cx = width * 0.5f
-
-        paint.style = Paint.Style.FILL
-        paint.color =
-            if (d < 20f)
-                Color.rgb(255, 90, 70)
-            else
-                Color.rgb(255, 180, 45)
-
-        canvas.drawRoundRect(
-            cx - size,
-            y - size * 0.45f,
-            cx + size,
-            y + size * 0.45f,
-            size * 0.2f,
-            size * 0.2f,
-            paint
-        )
-
-        paint.color = Color.WHITE
-        paint.textAlign = Paint.Align.CENTER
-        paint.textSize =
-            max(18f, width * 0.022f)
-
-        canvas.drawText(
-            "${d.toInt()}m",
-            cx,
-            y - size * 0.75f,
-            paint
-        )
+        val point = projectWorld(d.coerceIn(4f, 120f), 0f, width, height) ?: return
+        val normalized = (d / 120f).coerceIn(0.05f, 1f)
+        val carW = width * (0.065f - normalized * 0.032f)
+        val carH = carW * 1.75f
+        drawTopDownCar(canvas, point.x, point.y, carW, carH, false)
     }
 
     private fun drawSpeed(
@@ -774,8 +879,8 @@ class CarrotMainScreen(
         s: HudState
     ) {
         paint.style = Paint.Style.FILL
-        paint.textAlign = Paint.Align.CENTER
-        paint.color = Color.WHITE
+        paint.textAlign = Paint.Align.LEFT
+        paint.color = Color.rgb(25, 28, 30)
         paint.isFakeBoldText = true
 
         paint.textSize =
@@ -786,8 +891,8 @@ class CarrotMainScreen(
                 .coerceAtLeast(0f)
                 .toInt()
                 .toString(),
-            width * 0.5f,
-            height * 0.19f,
+            width * 0.055f,
+            height * 0.25f,
             paint
         )
 
@@ -795,31 +900,44 @@ class CarrotMainScreen(
         paint.textSize =
             max(15f, height * 0.034f)
 
-        paint.color = Color.rgb(170, 180, 188)
+        paint.color = Color.rgb(91, 97, 99)
 
         canvas.drawText(
             "km/h",
-            width * 0.5f,
-            height * 0.235f,
+            width * 0.058f,
+            height * 0.30f,
             paint
         )
 
         if (s.cruiseKph > 0f) {
             paint.color =
                 if (s.enabled)
-                    Color.rgb(50, 230, 120)
+                    Color.rgb(20, 150, 76)
                 else
-                    Color.rgb(180, 190, 195)
+                    Color.rgb(91, 97, 99)
 
             paint.textSize =
                 max(22f, height * 0.055f)
 
             canvas.drawText(
                 "SET ${s.cruiseKph.toInt()}",
-                width * 0.5f,
-                height * 0.30f,
+                width * 0.058f,
+                height * 0.37f,
                 paint
             )
+        }
+
+        s.leadDistance?.let { distance ->
+            paint.textAlign = Paint.Align.RIGHT
+            paint.isFakeBoldText = true
+            paint.color = if (distance < 20f) Color.rgb(205, 47, 40) else Color.rgb(25, 28, 30)
+            paint.textSize = max(30f, height * 0.075f)
+            canvas.drawText("${distance.toInt()} m", width * 0.945f, height * 0.24f, paint)
+            paint.isFakeBoldText = false
+            paint.color = Color.rgb(91, 97, 99)
+            paint.textSize = max(16f, height * 0.034f)
+            val sign = if (s.leadRelSpeed > 0f) "+" else ""
+            canvas.drawText("$sign${s.leadRelSpeed.toInt()} km/h", width * 0.945f, height * 0.30f, paint)
         }
     }
 
@@ -830,24 +948,20 @@ class CarrotMainScreen(
         s: HudState
     ) {
         paint.style = Paint.Style.FILL
-        paint.textAlign = Paint.Align.LEFT
+        paint.textAlign = Paint.Align.CENTER
         paint.isFakeBoldText = true
         paint.textSize =
             max(18f, height * 0.040f)
 
-        paint.color =
-            if (s.connected)
-                Color.rgb(50, 225, 115)
-            else
-                Color.rgb(255, 165, 55)
+        paint.color = if (s.connected) Color.rgb(20, 150, 76) else Color.rgb(205, 116, 34)
 
         canvas.drawText(
             if (s.connected)
-                "CARROT CONNECTED"
+                "GPS  ·  ONLINE"
             else
                 "SEARCHING COMMA 4",
-            width * 0.035f,
-            height * 0.075f,
+            width * 0.5f,
+            height * 0.955f,
             paint
         )
 
@@ -855,37 +969,16 @@ class CarrotMainScreen(
         paint.textSize =
             max(14f, height * 0.028f)
 
-        paint.color = Color.rgb(140, 150, 160)
+        paint.color = Color.rgb(105, 111, 113)
 
         s.commaIp?.let {
             canvas.drawText(
                 it,
-                width * 0.035f,
-                height * 0.115f,
+                width * 0.5f,
+                height * 0.988f,
                 paint
             )
         }
-
-        paint.textAlign = Paint.Align.RIGHT
-
-        paint.color =
-            if (s.enabled)
-                Color.rgb(50, 230, 120)
-            else
-                Color.rgb(150, 160, 168)
-
-        paint.textSize =
-            max(22f, height * 0.050f)
-
-        canvas.drawText(
-            if (s.enabled)
-                "OPENPILOT ACTIVE"
-            else
-                "OPENPILOT",
-            width * 0.965f,
-            height * 0.075f,
-            paint
-        )
     }
 
     private suspend fun findCommaIp(): String? =

@@ -3,8 +3,6 @@ package com.example.carrothud
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
@@ -35,6 +33,7 @@ import java.util.Collections
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 class CarrotMainScreen(
     carContext: CarContext
@@ -86,7 +85,9 @@ class CarrotMainScreen(
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val egoVehicleBitmap =
-        BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_ev)
+        BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_de_3d)
+    private val leadVehicleBitmap =
+        BitmapFactory.decodeResource(carContext.resources, R.drawable.lead_sedan_3d)
 
     init {
         runCatching {
@@ -489,6 +490,8 @@ class CarrotMainScreen(
 
             drawRoadBackground(canvas, width, height)
 
+            drawRoadMotion(canvas, width, height, s.speedKph)
+
             drawRoad(
                 canvas,
                 width,
@@ -638,6 +641,30 @@ class CarrotMainScreen(
         )
     }
 
+    /** Moving perspective markers provide continuous forward-motion depth at the live vehicle speed. */
+    private fun drawRoadMotion(canvas: Canvas, width: Float, height: Float, speedKph: Float) {
+        val now = SystemClock.uptimeMillis() / 1000f
+        val speedFactor = (speedKph / 90f).coerceIn(0.08f, 1.8f)
+        val phase = (now * speedFactor * 0.72f) % 1f
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.color = Color.argb(185, 255, 255, 255)
+        for (lane in floatArrayOf(-0.24f, 0.24f)) {
+            for (i in 0..7) {
+                val t0 = ((i / 8f + phase) % 1f).coerceIn(0f, 1f)
+                val t1 = (t0 + 0.055f + t0 * 0.065f).coerceAtMost(1f)
+                val y0 = height * (0.27f + t0 * t0 * 0.79f)
+                val y1 = height * (0.27f + t1 * t1 * 0.79f)
+                val x0 = width * (0.5f + lane * t0)
+                val x1 = width * (0.5f + lane * t1)
+                paint.strokeWidth = max(2f, width * (0.0012f + t0 * 0.004f))
+                canvas.drawLine(x0, y0, x1, y1, paint)
+            }
+        }
+        paint.style = Paint.Style.FILL
+    }
+
     private fun drawDrivingCorridor(
         canvas: Canvas,
         xs: FloatArray,
@@ -767,19 +794,26 @@ class CarrotMainScreen(
         s: HudState
     ) {
         val cx = width * 0.5f
-        val cy = height * 0.73f
+        val now = SystemClock.uptimeMillis()
+        val roadPulse = (s.speedKph / 100f).coerceIn(0f, 1.2f)
+        val bob = sin(now / 150.0).toFloat() * height * 0.0025f * roadPulse
+        val sway = sin(now / 620.0).toFloat() * 0.65f * roadPulse
+        val cy = height * 0.75f + bob
         val blinkOn = (SystemClock.uptimeMillis() / 450L) % 2L == 0L
+        canvas.save()
+        canvas.rotate(sway, cx, cy)
         drawTopDownCar(
             canvas,
             cx,
             cy,
             width * 0.115f,
-            height * 0.23f,
+            height * 0.31f,
             true,
             s.enabled,
             s.leftBlinker && blinkOn,
             s.rightBlinker && blinkOn
         )
+        canvas.restore()
     }
 
     private fun drawTopDownCar(
@@ -793,22 +827,21 @@ class CarrotMainScreen(
         leftBlinker: Boolean = false,
         rightBlinker: Boolean = false
     ) {
-        if (egoVehicleBitmap != null) {
-            // The source sprite is 300x452. Compute width from height to avoid OEM-wide-screen squash.
+        val vehicleBitmap = if (ego) egoVehicleBitmap else leadVehicleBitmap
+        if (vehicleBitmap != null) {
+            // Width is always derived from source aspect ratio: never stretch on the Niro wide display.
             val drawnHeight = carH
-            val drawnWidth = drawnHeight * egoVehicleBitmap.width / egoVehicleBitmap.height
+            val drawnWidth = drawnHeight * vehicleBitmap.width / vehicleBitmap.height
             val destination = RectF(
                 cx - drawnWidth / 2f,
                 cy - drawnHeight / 2f,
                 cx + drawnWidth / 2f,
                 cy + drawnHeight / 2f
             )
-            paint.alpha = if (ego) 255 else 205
-            paint.colorFilter = if (ego) null else ColorMatrixColorFilter(
-                ColorMatrix().apply { setSaturation(0f) }
-            )
+            paint.alpha = if (ego) 255 else 230
+            paint.colorFilter = null
             paint.setShadowLayer(drawnWidth * 0.20f, 0f, drawnWidth * 0.08f, Color.argb(75, 0, 0, 0))
-            canvas.drawBitmap(egoVehicleBitmap, null, destination, paint)
+            canvas.drawBitmap(vehicleBitmap, null, destination, paint)
             paint.clearShadowLayer()
             paint.colorFilter = null
             paint.alpha = 255
@@ -883,9 +916,10 @@ class CarrotMainScreen(
         val visualDistance = (d * 1.75f).coerceIn(8f, 120f)
         val point = projectWorld(visualDistance, 0f, width, height) ?: return
         val normalized = (d / 120f).coerceIn(0.05f, 1f)
-        val carH = height * (0.13f - normalized * 0.045f)
-        val carW = carH * egoVehicleBitmap.width / egoVehicleBitmap.height
-        drawTopDownCar(canvas, point.x, point.y, carW, carH, false)
+        val carH = height * (0.115f - normalized * 0.035f)
+        val carW = carH * leadVehicleBitmap.width / leadVehicleBitmap.height
+        val leadBob = sin(SystemClock.uptimeMillis() / 210.0).toFloat() * height * 0.0014f
+        drawTopDownCar(canvas, point.x, point.y + leadBob, carW, carH, false)
     }
 
     private fun drawSpeed(

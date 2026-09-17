@@ -590,48 +590,29 @@ class CarrotMainScreen(
         val bottom = height * 1.03f
         val center = width * 0.5f
 
-        if (s.pathX.size > 2 && s.pathY.size > 2) {
-            drawDrivingCorridor(canvas, s.pathX, s.pathY, width, height, s.enabled)
-        }
-
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = max(3f, width * 0.004f)
         paint.strokeCap = Paint.Cap.ROUND
+        paint.color = Color.rgb(15, 112, 225)
 
-        if (s.laneLines.isNotEmpty()) {
-            s.laneLines.forEach { lane ->
-                paint.color = Color.rgb(15, 112, 225)
+        // Stable straight visualization avoids noisy modelV2 curvature on straight roads.
+        drawFallbackLane(
+            canvas,
+            center - width * 0.16f,
+            center - width * 0.025f,
+            horizon,
+            bottom,
+            paint
+        )
 
-                drawWorldLine(
-                    canvas,
-                    lane.first,
-                    lane.second,
-                    width,
-                    height,
-                    paint
-                )
-            }
-        } else {
-            paint.color = Color.rgb(15, 112, 225)
-
-            drawFallbackLane(
-                canvas,
-                center - width * 0.16f,
-                center - width * 0.025f,
-                horizon,
-                bottom,
-                paint
-            )
-
-            drawFallbackLane(
-                canvas,
-                center + width * 0.16f,
-                center + width * 0.025f,
-                horizon,
-                bottom,
-                paint
-            )
-        }
+        drawFallbackLane(
+            canvas,
+            center + width * 0.16f,
+            center + width * 0.025f,
+            horizon,
+            bottom,
+            paint
+        )
 
         drawEgoCar(
             canvas,
@@ -916,10 +897,14 @@ class CarrotMainScreen(
         val visualDistance = (d * 1.75f).coerceIn(8f, 120f)
         val point = projectWorld(visualDistance, 0f, width, height) ?: return
         val normalized = (d / 120f).coerceIn(0.05f, 1f)
-        val carH = height * (0.115f - normalized * 0.035f)
+        // Larger, distance-aware lead while retaining a sensible far-distance floor.
+        val carH = height * (0.19f - normalized * 0.11f)
         val carW = carH * leadVehicleBitmap.width / leadVehicleBitmap.height
         val leadBob = sin(SystemClock.uptimeMillis() / 210.0).toFloat() * height * 0.0014f
-        drawTopDownCar(canvas, point.x, point.y + leadBob, carW, carH, false)
+        val egoTop = height * (0.75f - 0.31f / 2f)
+        val maximumLeadCenterY = egoTop - height * 0.025f - carH / 2f
+        val leadCenterY = min(point.y + leadBob, maximumLeadCenterY)
+        drawTopDownCar(canvas, point.x, leadCenterY, carW, carH, false)
     }
 
     private fun drawSpeed(

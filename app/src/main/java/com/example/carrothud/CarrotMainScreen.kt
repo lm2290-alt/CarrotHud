@@ -9,7 +9,6 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
-import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.os.SystemClock
@@ -88,8 +87,6 @@ class CarrotMainScreen(
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val egoVehicleBitmap =
         BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_ev)
-    private val roadBackgroundBitmap =
-        BitmapFactory.decodeResource(carContext.resources, R.drawable.tesla_road_background)
 
     init {
         runCatching {
@@ -531,28 +528,53 @@ class CarrotMainScreen(
         }
     }
 
-    /** Center-crops instead of stretching so wide OEM navigation surfaces keep correct proportions. */
+    /** All geometry uses normalized screen coordinates, so wide OEM surfaces never stretch a bitmap. */
     private fun drawRoadBackground(canvas: Canvas, width: Float, height: Float) {
-        val bitmap = roadBackgroundBitmap
-        if (bitmap == null) {
-            canvas.drawColor(Color.rgb(232, 231, 226))
-            return
-        }
+        paint.style = Paint.Style.FILL
+        paint.shader = LinearGradient(
+            0f, 0f, 0f, height,
+            Color.rgb(244, 245, 243), Color.rgb(205, 207, 203),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(0f, 0f, width, height, paint)
+        paint.shader = null
 
-        val targetRatio = width / height
-        val bitmapRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
-        val source = if (bitmapRatio > targetRatio) {
-            val sourceWidth = (bitmap.height * targetRatio).toInt()
-            val left = (bitmap.width - sourceWidth) / 2
-            Rect(left, 0, left + sourceWidth, bitmap.height)
-        } else {
-            val sourceHeight = (bitmap.width / targetRatio).toInt()
-            val top = (bitmap.height - sourceHeight) / 2
-            Rect(0, top, bitmap.width, top + sourceHeight)
-        }
-        paint.alpha = 255
-        paint.colorFilter = null
-        canvas.drawBitmap(bitmap, source, RectF(0f, 0f, width, height), paint)
+        // Soft distant landscape, drawn in screen-relative coordinates.
+        paint.color = Color.rgb(218, 221, 216)
+        canvas.drawPath(Path().apply {
+            moveTo(0f, height * 0.33f)
+            lineTo(width * 0.18f, height * 0.20f)
+            lineTo(width * 0.34f, height * 0.31f)
+            lineTo(width * 0.51f, height * 0.17f)
+            lineTo(width * 0.72f, height * 0.32f)
+            lineTo(width, height * 0.22f)
+            lineTo(width, height * 0.43f)
+            lineTo(0f, height * 0.43f)
+            close()
+        }, paint)
+
+        // Tesla-like matte road plane. No bitmap scaling means no horizontal distortion.
+        paint.shader = LinearGradient(
+            0f, height * 0.25f, 0f, height,
+            Color.rgb(226, 227, 224), Color.rgb(183, 187, 185),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawPath(Path().apply {
+            moveTo(width * 0.43f, height * 0.24f)
+            lineTo(width * 0.57f, height * 0.24f)
+            lineTo(width * 0.91f, height)
+            lineTo(width * 0.09f, height)
+            close()
+        }, paint)
+        paint.shader = null
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = max(2f, width * 0.0022f)
+        paint.color = Color.argb(155, 255, 255, 255)
+        canvas.drawLine(width * 0.36f, height, width * 0.475f, height * 0.25f, paint)
+        canvas.drawLine(width * 0.64f, height, width * 0.525f, height * 0.25f, paint)
+        paint.style = Paint.Style.FILL
     }
 
     private fun drawRoad(

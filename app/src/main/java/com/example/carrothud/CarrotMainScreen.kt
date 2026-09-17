@@ -12,8 +12,6 @@ import androidx.car.app.SurfaceContainer
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
 import androidx.car.app.model.Template
-import androidx.car.app.navigation.NavigationManager
-import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -74,16 +72,14 @@ class CarrotMainScreen(
     init {
         runCatching {
             carContext
-                .getCarService(NavigationManager::class.java)
-                .setNavigationManagerCallback(
-                    object : NavigationManagerCallback {
-                        override fun onStopNavigation() = Unit
-                    }
-                )
-
-            carContext
                 .getCarService(AppManager::class.java)
                 .setSurfaceCallback(this)
+        }.onFailure { e ->
+            android.util.Log.e(
+                "CarrotAA",
+                "setSurfaceCallback failed",
+                e
+            )
         }
     }
 
@@ -290,8 +286,8 @@ class CarrotMainScreen(
 
         val serviceId = c.u8()
 
-        c.u8()   // flags
-        c.u16()  // sequence
+        c.u8()
+        c.u16()
 
         when (serviceId) {
             1 -> decodeCarState(c)
@@ -304,7 +300,7 @@ class CarrotMainScreen(
 
     private fun decodeCarState(c: Cursor) {
         val vEgo = c.f32()
-        c.f32() // aEgo
+        c.f32()
 
         val cluster = c.f32()
         val cruise = c.f32()
@@ -343,8 +339,8 @@ class CarrotMainScreen(
     }
 
     private fun decodeModelV2(c: Cursor) {
-        c.u32() // frameId
-        c.u32() // frameIdExtra
+        c.u32()
+        c.u32()
 
         val position = readXyz(c)
 
@@ -373,7 +369,7 @@ class CarrotMainScreen(
         if (c.remaining() < 4) return
 
         val dRel = c.f32()
-        c.f32() // yRel
+        c.f32()
         val vRel = c.f32()
 
         repeat(6) {
@@ -381,6 +377,7 @@ class CarrotMainScreen(
         }
 
         if (c.remaining() >= 1) c.bool()
+
         val status =
             if (c.remaining() >= 1) c.bool()
             else false
@@ -407,7 +404,7 @@ class CarrotMainScreen(
         val x = c.u16CmList()
         val y = c.i16MmList()
 
-        c.i16MmList() // z
+        c.i16MmList()
 
         return x to y
     }

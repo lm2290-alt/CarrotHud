@@ -1,275 +1,988 @@
 package com.example.carrothud
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import androidx.car.app.AppManager
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
-import androidx.car.app.model.*
+import androidx.car.app.model.Action
+import androidx.car.app.model.ActionStrip
+import androidx.car.app.model.Template
 import androidx.car.app.navigation.NavigationManager
 import androidx.car.app.navigation.NavigationManagerCallback
 import androidx.car.app.navigation.model.NavigationTemplate
 import kotlinx.coroutines.*
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.InputStream
-import java.net.HttpURLConnection
+import okhttp3.*
+import okio.ByteString
+import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
-import java.net.URL
-import java.text.SimpleDateFormat
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Collections
-import java.util.Date
-import java.util.Locale
+import java.util.concurrent.TimeUnit
+import kotlin.math.max
+import kotlin.math.min
 
-class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCallback {
+class CarrotMainScreen(
+    carContext: CarContext
+) : Screen(carContext), SurfaceCallback {
+
+    data class HudState(
+        val speedKph: Float = 0f,
+        val cruiseKph: Float = 0f,
+        val enabled: Boolean = false,
+        val leadDistance: Float? = null,
+        val leadRelSpeed: Float = 0f,
+        val pathX: FloatArray = floatArrayOf(),
+        val pathY: FloatArray = floatArrayOf(),
+        val laneLines: List<Pair<FloatArray, FloatArray>> = emptyList(),
+        val connected: Boolean = false,
+        val commaIp: String? = null
+    )
+
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO
+    )
 
     private var surfaceContainer: SurfaceContainer? = null
-    @Volatile private var isRendering = false
-    private var streamJob: Job? = null
-    private val renderLock = Any()
-    private var lastMessage: String = "콤마4 탐색 중..."
-    @Volatile private var currentBitmap: Bitmap? = null
+
+    @Volatile
+    private var rendering = false
+
+    @Volatile
+    private var state = HudState()
+
+    private var renderJob: Job? = null
+    private var connectJob: Job? = null
+
+    private var webSocket: WebSocket? = null
+
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(10, TimeUnit.SECONDS)
+        .build()
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     init {
         runCatching {
-            val navigationManager = carContext.getCarService(NavigationManager::class.java)
-            navigationManager.setNavigationManagerCallback(object : NavigationManagerCallback {
-                override fun onStopNavigation() {}
-            })
+            carContext
+                .getCarService(NavigationManager::class.java)
+                .setNavigationManagerCallback(
+                    object : NavigationManagerCallback {
+                        override fun onStopNavigation() = Unit
+                    }
+                )
 
-            carContext.getCarService(androidx.car.app.AppManager::class.java)
+            carContext
+                .getCarService(AppManager::class.java)
                 .setSurfaceCallback(this)
         }
     }
 
-    private fun saveLogToFile(tag: String, throwable: Throwable) {
+    override fun onSurfaceAvailable(
+        surfaceContainer: SurfaceContainer
+    ) {
+        this.surfaceContainer = surfaceContainer
+        rendering = true
+
+        startRenderer()
+        startConnection()
+    }
+
+    override fun onSurfaceDestroyed(
+        surfaceContainer: SurfaceContainer
+    ) {
+        rendering = false
+
+        renderJob?.cancel()
+        connectJob?.cancel()
+
+        webSocket?.close(1000, "surface destroyed")
+        webSocket = null
+
+        this.surfaceContainer = null
+    }
+
+    private fun startRenderer() {
+        renderJob?.cancel()
+
+        renderJob = scope.launch {
+            while (rendering && isActive) {
+                drawCluster()
+                delay(16)
+            }
+        }
+    }
+
+    private fun startConnection() {
+        connectJob?.cancel()
+
+        connectJob = scope.launch {
+            while (rendering && isActive) {
+                state = state.copy(
+                    connected = false,
+                    commaIp = null
+                )
+
+                val ip = findCommaIp()
+
+                if (ip == null) {
+                    delay(2000)
+                    continue
+                }
+
+                state = state.copy(commaIp = ip)
+
+                connectWebSocket(ip)
+
+                while (
+                    rendering &&
+                    isActive &&
+                    webSocket != null
+                ) {
+                    delay(1000)
+                }
+
+                delay(1500)
+            }
+        }
+    }
+
+    private fun connectWebSocket(ip: String) {
+        webSocket?.cancel()
+
+        val services = listOf(
+            "carState",
+            "controlsState",
+            "selfdriveState",
+            "modelV2",
+            "radarState"
+        ).joinToString(",")
+
+        val url =
+            "ws://$ip:7000/ws/compact_state" +
+            "?services=$services"
+
+        val request = Request.Builder()
+            .url(url)
+            .build()
+
+        webSocket = httpClient.newWebSocket(
+            request,
+            object : WebSocketListener() {
+
+                override fun onOpen(
+                    webSocket: WebSocket,
+                    response: Response
+                ) {
+                    state = state.copy(
+                        connected = true,
+                        commaIp = ip
+                    )
+                }
+
+                override fun onMessage(
+                    webSocket: WebSocket,
+                    text: String
+                ) {
+                    // 서버 hello JSON.
+                    // 실제 주행 데이터는 binary frame으로 들어온다.
+                }
+
+                override fun onMessage(
+                    webSocket: WebSocket,
+                    bytes: ByteString
+                ) {
+                    runCatching {
+                        decodePacket(bytes.toByteArray())
+                    }
+                }
+
+                override fun onClosed(
+                    webSocket: WebSocket,
+                    code: Int,
+                    reason: String
+                ) {
+                    state = state.copy(
+                        connected = false
+                    )
+
+                    if (this@CarrotMainScreen.webSocket === webSocket) {
+                        this@CarrotMainScreen.webSocket = null
+                    }
+                }
+
+                override fun onFailure(
+                    webSocket: WebSocket,
+                    t: Throwable,
+                    response: Response?
+                ) {
+                    state = state.copy(
+                        connected = false
+                    )
+
+                    if (this@CarrotMainScreen.webSocket === webSocket) {
+                        this@CarrotMainScreen.webSocket = null
+                    }
+                }
+            }
+        )
+    }
+
+    private fun decodePacket(data: ByteArray) {
+        if (data.size < 4) return
+
+        if (
+            data[0] == 'C'.code.toByte() &&
+            data[1] == 'V'.code.toByte() &&
+            data[2] == 'S'.code.toByte() &&
+            data[3] == '1'.code.toByte()
+        ) {
+            decodeFrame(data)
+            return
+        }
+
+        if (
+            data[0] == 'C'.code.toByte() &&
+            data[1] == 'V'.code.toByte() &&
+            data[2] == 'B'.code.toByte() &&
+            data[3] == '1'.code.toByte()
+        ) {
+            decodeBatch(data)
+        }
+    }
+
+    private fun decodeBatch(data: ByteArray) {
+        val c = Cursor(data)
+
+        c.skip(4)
+
+        val count = c.u16()
+
+        repeat(count) {
+            val length = c.u32().toInt()
+
+            if (
+                length <= 0 ||
+                c.remaining() < length
+            ) return
+
+            val frame = c.bytes(length)
+
+            decodeFrame(frame)
+        }
+    }
+
+    private fun decodeFrame(data: ByteArray) {
+        if (data.size < 8) return
+
+        val c = Cursor(data)
+
+        c.skip(4)
+
+        val serviceId = c.u8()
+
+        c.u8()   // flags
+        c.u16()  // sequence
+
+        when (serviceId) {
+            1 -> decodeCarState(c)
+            2 -> decodeControlsState(c)
+            6 -> decodeSelfdriveState(c)
+            9 -> decodeModelV2(c)
+            13 -> decodeRadarState(c)
+        }
+    }
+
+    private fun decodeCarState(c: Cursor) {
+        val vEgo = c.f32()
+        c.f32() // aEgo
+
+        val cluster = c.f32()
+        val cruise = c.f32()
+
+        val speedMps =
+            if (cluster > 0.01f) cluster else vEgo
+
+        state = state.copy(
+            speedKph = speedMps * 3.6f,
+            cruiseKph = max(0f, cruise * 3.6f),
+            connected = true
+        )
+    }
+
+    private fun decodeControlsState(c: Cursor) {
+        val enabled = c.bool()
+
+        val cruise = c.f32()
+
+        state = state.copy(
+            enabled = enabled,
+            cruiseKph =
+                if (cruise > 0f)
+                    cruise * 3.6f
+                else
+                    state.cruiseKph
+        )
+    }
+
+    private fun decodeSelfdriveState(c: Cursor) {
+        val enabled = c.bool()
+
+        state = state.copy(
+            enabled = enabled
+        )
+    }
+
+    private fun decodeModelV2(c: Cursor) {
+        c.u32() // frameId
+        c.u32() // frameIdExtra
+
+        val position = readXyz(c)
+
+        readVelocity(c)
+
+        val laneCount = c.u8()
+
+        val lanes = ArrayList<Pair<FloatArray, FloatArray>>()
+
+        repeat(laneCount) {
+            val xyz = readXyz(c)
+
+            lanes.add(
+                xyz.first to xyz.second
+            )
+        }
+
+        state = state.copy(
+            pathX = position.first,
+            pathY = position.second,
+            laneLines = lanes
+        )
+    }
+
+    private fun decodeRadarState(c: Cursor) {
+        if (c.remaining() < 4) return
+
+        val dRel = c.f32()
+        c.f32() // yRel
+        val vRel = c.f32()
+
+        repeat(6) {
+            if (c.remaining() >= 4) c.f32()
+        }
+
+        if (c.remaining() >= 1) c.bool()
+        val status =
+            if (c.remaining() >= 1) c.bool()
+            else false
+
+        state = state.copy(
+            leadDistance =
+                if (status && dRel > 0f)
+                    dRel
+                else
+                    null,
+            leadRelSpeed = vRel
+        )
+    }
+
+    private fun readVelocity(
+        c: Cursor
+    ): FloatArray {
+        return c.i16CmList()
+    }
+
+    private fun readXyz(
+        c: Cursor
+    ): Pair<FloatArray, FloatArray> {
+        val x = c.u16CmList()
+        val y = c.i16MmList()
+
+        c.i16MmList() // z
+
+        return x to y
+    }
+
+    private fun drawCluster() {
+        val container = surfaceContainer ?: return
+        val surface = container.surface ?: return
+
+        if (
+            !rendering ||
+            !surface.isValid
+        ) return
+
+        var canvas: Canvas? = null
+
         try {
-            val logFile = File(carContext.filesDir, "carrothud_error.log")
-            val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-            val logContent = "[$time] [$tag] ${throwable.javaClass.name}: ${throwable.localizedMessage}\n${throwable.stackTraceToString()}\n-----------------------------------\n"
-            logFile.appendText(logContent)
-        } catch (e: Exception) {
-            // 파일 쓰기 예외 무시
-        }
-    }
+            canvas = surface.lockCanvas(null)
 
-    override fun onSurfaceAvailable(surfaceContainer: SurfaceContainer) {
-        synchronized(renderLock) {
-            this.surfaceContainer = surfaceContainer
-            isRendering = true
-        }
-        startStreamingPipeline()
-    }
+            val width =
+                if (container.width > 0)
+                    container.width.toFloat()
+                else
+                    canvas.width.toFloat()
 
-    override fun onSurfaceDestroyed(surfaceContainer: SurfaceContainer) {
-        synchronized(renderLock) {
-            isRendering = false
-            streamJob?.cancel()
-            this.surfaceContainer = null
-            currentBitmap?.recycle()
-            currentBitmap = null
-        }
-    }
+            val height =
+                if (container.height > 0)
+                    container.height.toFloat()
+                else
+                    canvas.height.toFloat()
 
-    private fun startStreamingPipeline() {
-        streamJob?.cancel()
-        streamJob = CoroutineScope(Dispatchers.IO).launch {
-            updateMessage("콤마4 탐색 중...")
-            val commaIp = findCommaDeviceIp()
+            val s = state
 
-            if (commaIp == null) {
-                updateMessage("콤마4(포트 7000) 탐색 실패\n서브넷 확인 필요\n재시도 중...")
-                delay(3000)
-                if (isRendering) startStreamingPipeline()
-                return@launch
-            }
+            canvas.drawColor(Color.rgb(4, 6, 8))
 
-            updateMessage("스트리밍 연결 중: $commaIp")
-            runMjpegStream(commaIp)
-        }
-    }
+            drawRoad(
+                canvas,
+                width,
+                height,
+                s
+            )
 
-    private suspend fun runMjpegStream(ip: String) {
-        var connection: HttpURLConnection? = null
-        var inputStream: InputStream? = null
-        try {
-            val url = URL("http://$ip:7000")
-            connection = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3000
-                readTimeout = 5000
-                connect()
-            }
-            inputStream = connection.inputStream
-            updateMessage("스트리밍 연결 성공")
+            drawLead(
+                canvas,
+                width,
+                height,
+                s
+            )
 
-            val buffer = ByteArray(16384)
-            val bos = ByteArrayOutputStream()
+            drawSpeed(
+                canvas,
+                width,
+                height,
+                s
+            )
 
-            while (isRendering) {
-                val bytesRead = inputStream.read(buffer)
-                if (bytesRead == -1) break
-                bos.write(buffer, 0, bytesRead)
+            drawStatus(
+                canvas,
+                width,
+                height,
+                s
+            )
 
-                val bytes = bos.toByteArray()
-                var startIndex = -1
-                var endIndex = -1
-
-                for (i in 0 until bytes.size - 1) {
-                    if ((bytes[i].toInt() and 0xFF) == 0xFF && (bytes[i + 1].toInt() and 0xFF) == 0xD8) {
-                        startIndex = i
-                        break
-                    }
-                }
-
-                if (startIndex != -1) {
-                    for (i in startIndex + 2 until bytes.size - 1) {
-                        if ((bytes[i].toInt() and 0xFF) == 0xFF && (bytes[i + 1].toInt() and 0xFF) == 0xD9) {
-                            endIndex = i + 2
-                            break
-                        }
-                    }
-                }
-
-                if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
-                    try {
-                        val bitmap = BitmapFactory.decodeByteArray(bytes, startIndex, endIndex - startIndex)
-                        if (bitmap != null) {
-                            synchronized(renderLock) {
-                                currentBitmap?.recycle()
-                                currentBitmap = bitmap
-                            }
-                        }
-                    } catch (e: Exception) {
-                        saveLogToFile("BitmapDecodeError", e)
-                    }
-
-                    bos.reset()
-                    if (endIndex < bytes.size) {
-                        bos.write(bytes, endIndex, bytes.size - endIndex)
-                    }
-                } else if (bytes.size > 2 * 1024 * 1024) {
-                    bos.reset()
-                }
-
-                renderFrame()
-            }
-        } catch (e: Exception) {
-            saveLogToFile("StreamError", e)
-            android.util.Log.e("CarrotHUD", "Stream error", e)
-            updateMessage("오류 발생:\n${e.javaClass.simpleName}: ${e.localizedMessage}")
-            delay(3000)
-            if (isRendering) {
-                runMjpegStream(ip)
-            }
+        } catch (_: Throwable) {
         } finally {
-            try { inputStream?.close() } catch (e: Exception) {}
-            try { connection?.disconnect() } catch (e: Exception) {}
+            if (canvas != null) {
+                runCatching {
+                    surface.unlockCanvasAndPost(canvas)
+                }
+            }
         }
     }
 
-    private fun updateMessage(msg: String) {
-        lastMessage = msg
-        renderFrame()
+    private fun drawRoad(
+        canvas: Canvas,
+        width: Float,
+        height: Float,
+        s: HudState
+    ) {
+        val horizon = height * 0.23f
+        val bottom = height * 1.02f
+        val center = width * 0.5f
+
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(12, 15, 18)
+
+        val road = Path().apply {
+            moveTo(center - width * 0.055f, horizon)
+            lineTo(center + width * 0.055f, horizon)
+            lineTo(center + width * 0.42f, bottom)
+            lineTo(center - width * 0.42f, bottom)
+            close()
+        }
+
+        canvas.drawPath(road, paint)
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = max(2f, width * 0.003f)
+        paint.strokeCap = Paint.Cap.ROUND
+
+        if (s.laneLines.isNotEmpty()) {
+            s.laneLines.forEachIndexed { index, lane ->
+                paint.color =
+                    if (index == 1 || index == 2)
+                        Color.WHITE
+                    else
+                        Color.rgb(100, 110, 120)
+
+                drawWorldLine(
+                    canvas,
+                    lane.first,
+                    lane.second,
+                    width,
+                    height,
+                    paint
+                )
+            }
+        } else {
+            paint.color = Color.rgb(110, 120, 130)
+
+            drawFallbackLane(
+                canvas,
+                center - width * 0.16f,
+                center - width * 0.025f,
+                horizon,
+                bottom,
+                paint
+            )
+
+            drawFallbackLane(
+                canvas,
+                center + width * 0.16f,
+                center + width * 0.025f,
+                horizon,
+                bottom,
+                paint
+            )
+        }
+
+        if (
+            s.pathX.size > 2 &&
+            s.pathY.size > 2
+        ) {
+            paint.color =
+                if (s.enabled)
+                    Color.rgb(40, 220, 110)
+                else
+                    Color.rgb(90, 100, 110)
+
+            paint.strokeWidth =
+                max(5f, width * 0.010f)
+
+            drawWorldLine(
+                canvas,
+                s.pathX,
+                s.pathY,
+                width,
+                height,
+                paint
+            )
+        }
+
+        drawEgoCar(
+            canvas,
+            width,
+            height,
+            s.enabled
+        )
     }
 
-    private fun renderFrame() {
-        synchronized(renderLock) {
-            val container = surfaceContainer ?: return
-            val surface = container.surface ?: return
-            if (!surface.isValid || !isRendering) return
+    private fun drawFallbackLane(
+        canvas: Canvas,
+        bottomX: Float,
+        topX: Float,
+        topY: Float,
+        bottomY: Float,
+        p: Paint
+    ) {
+        canvas.drawLine(
+            bottomX,
+            bottomY,
+            topX,
+            topY,
+            p
+        )
+    }
 
-            var canvas: Canvas? = null
-            try {
-                canvas = surface.lockCanvas(null)
-                if (canvas != null) {
-                    val width = if (container.width > 0) container.width else canvas.width
-                    val height = if (container.height > 0) container.height else canvas.height
+    private fun drawWorldLine(
+        canvas: Canvas,
+        xs: FloatArray,
+        ys: FloatArray,
+        width: Float,
+        height: Float,
+        p: Paint
+    ) {
+        val n = min(xs.size, ys.size)
 
-                    canvas.drawColor(Color.BLACK)
+        if (n < 2) return
 
-                    val bmp = currentBitmap
-                    if (bmp != null && !bmp.isRecycled) {
-                        val srcRect = android.graphics.Rect(0, 0, bmp.width, bmp.height)
-                        val destRect = android.graphics.Rect(0, 0, width, height)
-                        canvas.drawBitmap(bmp, srcRect, destRect, null)
-                    } else {
-                        val paint = Paint().apply {
-                            color = Color.WHITE
-                            textSize = 28f
-                            textAlign = Paint.Align.CENTER
-                            isAntiAlias = true
-                        }
-                        val lines = lastMessage.split("\n")
-                        val startY = height / 2f - (lines.size * 18f)
-                        lines.forEachIndexed { index, line ->
-                            canvas.drawText(line, width / 2f, startY + (index * 35f), paint)
+        val path = Path()
+        var started = false
+
+        for (i in 0 until n) {
+            val forward = xs[i]
+
+            if (
+                forward < 0f ||
+                forward > 120f
+            ) continue
+
+            val depth =
+                (forward / 120f)
+                    .coerceIn(0f, 1f)
+
+            val screenY =
+                height * 0.90f -
+                depth * height * 0.66f
+
+            val perspective =
+                1f - depth * 0.80f
+
+            val screenX =
+                width * 0.5f +
+                ys[i] *
+                width *
+                0.060f *
+                perspective
+
+            if (!started) {
+                path.moveTo(
+                    screenX,
+                    screenY
+                )
+                started = true
+            } else {
+                path.lineTo(
+                    screenX,
+                    screenY
+                )
+            }
+        }
+
+        if (started) {
+            canvas.drawPath(path, p)
+        }
+    }
+
+    private fun drawEgoCar(
+        canvas: Canvas,
+        width: Float,
+        height: Float,
+        enabled: Boolean
+    ) {
+        val cx = width * 0.5f
+        val cy = height * 0.82f
+
+        val carW = width * 0.055f
+        val carH = height * 0.095f
+
+        paint.style = Paint.Style.FILL
+        paint.color =
+            if (enabled)
+                Color.rgb(38, 220, 105)
+            else
+                Color.rgb(210, 215, 220)
+
+        canvas.drawRoundRect(
+            cx - carW / 2f,
+            cy - carH / 2f,
+            cx + carW / 2f,
+            cy + carH / 2f,
+            carW * 0.25f,
+            carW * 0.25f,
+            paint
+        )
+
+        paint.color = Color.rgb(25, 30, 34)
+
+        canvas.drawRoundRect(
+            cx - carW * 0.28f,
+            cy - carH * 0.25f,
+            cx + carW * 0.28f,
+            cy + carH * 0.05f,
+            carW * 0.10f,
+            carW * 0.10f,
+            paint
+        )
+    }
+
+    private fun drawLead(
+        canvas: Canvas,
+        width: Float,
+        height: Float,
+        s: HudState
+    ) {
+        val d = s.leadDistance ?: return
+
+        val normalized =
+            (d / 120f)
+                .coerceIn(0.05f, 1f)
+
+        val y =
+            height * 0.76f -
+            normalized * height * 0.48f
+
+        val size =
+            width *
+            (0.055f - normalized * 0.025f)
+
+        val cx = width * 0.5f
+
+        paint.style = Paint.Style.FILL
+        paint.color =
+            if (d < 20f)
+                Color.rgb(255, 90, 70)
+            else
+                Color.rgb(255, 180, 45)
+
+        canvas.drawRoundRect(
+            cx - size,
+            y - size * 0.45f,
+            cx + size,
+            y + size * 0.45f,
+            size * 0.2f,
+            size * 0.2f,
+            paint
+        )
+
+        paint.color = Color.WHITE
+        paint.textAlign = Paint.Align.CENTER
+        paint.textSize =
+            max(18f, width * 0.022f)
+
+        canvas.drawText(
+            "${d.toInt()}m",
+            cx,
+            y - size * 0.75f,
+            paint
+        )
+    }
+
+    private fun drawSpeed(
+        canvas: Canvas,
+        width: Float,
+        height: Float,
+        s: HudState
+    ) {
+        paint.style = Paint.Style.FILL
+        paint.textAlign = Paint.Align.CENTER
+        paint.color = Color.WHITE
+        paint.isFakeBoldText = true
+
+        paint.textSize =
+            max(54f, height * 0.19f)
+
+        canvas.drawText(
+            s.speedKph
+                .coerceAtLeast(0f)
+                .toInt()
+                .toString(),
+            width * 0.5f,
+            height * 0.19f,
+            paint
+        )
+
+        paint.isFakeBoldText = false
+        paint.textSize =
+            max(15f, height * 0.034f)
+
+        paint.color = Color.rgb(170, 180, 188)
+
+        canvas.drawText(
+            "km/h",
+            width * 0.5f,
+            height * 0.235f,
+            paint
+        )
+
+        if (s.cruiseKph > 0f) {
+            paint.color =
+                if (s.enabled)
+                    Color.rgb(50, 230, 120)
+                else
+                    Color.rgb(180, 190, 195)
+
+            paint.textSize =
+                max(22f, height * 0.055f)
+
+            canvas.drawText(
+                "SET ${s.cruiseKph.toInt()}",
+                width * 0.5f,
+                height * 0.30f,
+                paint
+            )
+        }
+    }
+
+    private fun drawStatus(
+        canvas: Canvas,
+        width: Float,
+        height: Float,
+        s: HudState
+    ) {
+        paint.style = Paint.Style.FILL
+        paint.textAlign = Paint.Align.LEFT
+        paint.isFakeBoldText = true
+        paint.textSize =
+            max(18f, height * 0.040f)
+
+        paint.color =
+            if (s.connected)
+                Color.rgb(50, 225, 115)
+            else
+                Color.rgb(255, 165, 55)
+
+        canvas.drawText(
+            if (s.connected)
+                "CARROT CONNECTED"
+            else
+                "SEARCHING COMMA 4",
+            width * 0.035f,
+            height * 0.075f,
+            paint
+        )
+
+        paint.isFakeBoldText = false
+        paint.textSize =
+            max(14f, height * 0.028f)
+
+        paint.color = Color.rgb(140, 150, 160)
+
+        s.commaIp?.let {
+            canvas.drawText(
+                it,
+                width * 0.035f,
+                height * 0.115f,
+                paint
+            )
+        }
+
+        paint.textAlign = Paint.Align.RIGHT
+
+        paint.color =
+            if (s.enabled)
+                Color.rgb(50, 230, 120)
+            else
+                Color.rgb(150, 160, 168)
+
+        paint.textSize =
+            max(22f, height * 0.050f)
+
+        canvas.drawText(
+            if (s.enabled)
+                "OPENPILOT ACTIVE"
+            else
+                "OPENPILOT",
+            width * 0.965f,
+            height * 0.075f,
+            paint
+        )
+    }
+
+    private suspend fun findCommaIp(): String? =
+        coroutineScope {
+
+            val subnets =
+                (
+                    getLocalSubnets() +
+                    listOf(
+                        "192.168.43",
+                        "192.168.42",
+                        "192.168.137",
+                        "192.168.225",
+                        "172.20.10",
+                        "10.42.0",
+                        "192.168.0",
+                        "192.168.1",
+                        "192.168.8"
+                    )
+                ).distinct()
+
+            for (subnet in subnets) {
+                val jobs =
+                    (2..254).map { host ->
+                        async(Dispatchers.IO) {
+                            val ip =
+                                "$subnet.$host"
+
+                            if (
+                                isPortOpen(
+                                    ip,
+                                    7000,
+                                    180
+                                )
+                            ) ip
+                            else null
                         }
                     }
-                }
-            } catch (t: Throwable) {
-                saveLogToFile("RenderError", t)
-                android.util.Log.e("CarrotHUD", "Render error", t)
-            } finally {
-                if (canvas != null) {
-                    runCatching { surface.unlockCanvasAndPost(canvas) }
+
+                val found =
+                    jobs.awaitAll()
+                        .firstOrNull {
+                            it != null
+                        }
+
+                if (found != null) {
+                    return@coroutineScope found
                 }
             }
-        }
-    }
 
-    private suspend fun findCommaDeviceIp(): String? = coroutineScope {
-        val localSubnets = getLocalSubnets()
-        val candidateSubnets = (localSubnets + listOf(
-            "192.168.43", "192.168.42", "192.168.137", "192.168.225",
-            "172.20.10", "10.42.0", "192.168.0", "192.168.1", "192.168.8"
-        )).distinct()
-
-        for (subnet in candidateSubnets) {
-            val tasks = (2..254).map { i ->
-                async(Dispatchers.IO) {
-                    val testIp = "$subnet.$i"
-                    if (isPortOpen(testIp, 7000, 200)) testIp else null
-                }
-            }
-            val foundIp = tasks.awaitAll().firstOrNull { t -> t != null }
-            if (foundIp != null) return@coroutineScope foundIp
+            null
         }
-        null
-    }
 
     private fun getLocalSubnets(): List<String> {
-        val subnets = mutableListOf<String>()
-        try {
-            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-            for (intf in interfaces) {
-                val addrs = Collections.list(intf.inetAddresses)
-                for (addr in addrs) {
-                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                        val hostAddress = addr.hostAddress ?: continue
-                        val lastDot = hostAddress.lastIndexOf('.')
-                        if (lastDot > 0) {
-                            subnets.add(hostAddress.substring(0, lastDot))
+        val result =
+            mutableListOf<String>()
+
+        runCatching {
+            val interfaces =
+                Collections.list(
+                    NetworkInterface
+                        .getNetworkInterfaces()
+                )
+
+            for (network in interfaces) {
+                val addresses =
+                    Collections.list(
+                        network.inetAddresses
+                    )
+
+                for (address in addresses) {
+                    if (
+                        address is Inet4Address &&
+                        !address.isLoopbackAddress
+                    ) {
+                        val host =
+                            address.hostAddress
+                                ?: continue
+
+                        val dot =
+                            host.lastIndexOf('.')
+
+                        if (dot > 0) {
+                            result.add(
+                                host.substring(
+                                    0,
+                                    dot
+                                )
+                            )
                         }
                     }
                 }
             }
-        } catch (e: Exception) {}
-        return subnets
+        }
+
+        return result
     }
 
-    private fun isPortOpen(ip: String, port: Int, timeoutMs: Int): Boolean {
+    private fun isPortOpen(
+        ip: String,
+        port: Int,
+        timeout: Int
+    ): Boolean {
         return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, port), timeoutMs)
-                true
+            Socket().use {
+                it.connect(
+                    InetSocketAddress(
+                        ip,
+                        port
+                    ),
+                    timeout
+                )
             }
-        } catch (e: Exception) {
+
+            true
+        } catch (_: Throwable) {
             false
         }
     }
@@ -280,14 +993,100 @@ class CarrotMainScreen(carContext: CarContext) : Screen(carContext), SurfaceCall
                 ActionStrip.Builder()
                     .addAction(
                         Action.Builder()
-                            .setTitle("재시도")
+                            .setTitle("재연결")
                             .setOnClickListener {
-                                startStreamingPipeline()
+                                webSocket?.cancel()
+                                webSocket = null
+                                startConnection()
                             }
                             .build()
                     )
                     .build()
             )
             .build()
+    }
+
+    private class Cursor(
+        private val data: ByteArray
+    ) {
+        private val buffer =
+            ByteBuffer.wrap(data)
+                .order(ByteOrder.LITTLE_ENDIAN)
+
+        fun remaining(): Int =
+            buffer.remaining()
+
+        fun skip(n: Int) {
+            if (buffer.remaining() < n) {
+                throw IllegalStateException(
+                    "compact frame truncated"
+                )
+            }
+
+            buffer.position(
+                buffer.position() + n
+            )
+        }
+
+        fun bytes(n: Int): ByteArray {
+            if (remaining() < n) {
+                throw IllegalStateException(
+                    "compact frame truncated"
+                )
+            }
+
+            return ByteArray(n).also {
+                buffer.get(it)
+            }
+        }
+
+        fun u8(): Int =
+            buffer.get().toInt() and 0xFF
+
+        fun bool(): Boolean =
+            u8() != 0
+
+        fun u16(): Int =
+            buffer.short.toInt() and 0xFFFF
+
+        fun u32(): Long =
+            buffer.int.toLong() and 0xFFFFFFFFL
+
+        fun f32(): Float =
+            buffer.float
+
+        fun i16(): Int =
+            buffer.short.toInt()
+
+        fun text(): String {
+            val n = u16()
+
+            return bytes(n)
+                .toString(Charsets.UTF_8)
+        }
+
+        fun u16CmList(): FloatArray {
+            val n = u16()
+
+            return FloatArray(n) {
+                u16() / 100f
+            }
+        }
+
+        fun i16CmList(): FloatArray {
+            val n = u16()
+
+            return FloatArray(n) {
+                i16() / 100f
+            }
+        }
+
+        fun i16MmList(): FloatArray {
+            val n = u16()
+
+            return FloatArray(n) {
+                i16() / 1000f
+            }
+        }
     }
 }

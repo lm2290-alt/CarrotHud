@@ -824,37 +824,14 @@ class CarrotMainScreen(
                 RectF(cx - carW * 0.67f, cy - carH * 0.35f, cx - carW * 0.42f, cy - carH * 0.23f),
                 paint
             )
-            drawTurnArrow(canvas, cx - carW * 1.05f, cy, carW * 0.34f, true)
         }
         if (rightBlinker) {
             canvas.drawOval(
                 RectF(cx + carW * 0.42f, cy - carH * 0.35f, cx + carW * 0.67f, cy - carH * 0.23f),
                 paint
             )
-            drawTurnArrow(canvas, cx + carW * 1.05f, cy, carW * 0.34f, false)
         }
         paint.clearShadowLayer()
-    }
-
-    private fun drawTurnArrow(
-        canvas: Canvas,
-        cx: Float,
-        cy: Float,
-        size: Float,
-        pointsLeft: Boolean
-    ) {
-        val direction = if (pointsLeft) -1f else 1f
-        val arrow = Path().apply {
-            moveTo(cx + direction * size, cy - size * 0.62f)
-            lineTo(cx, cy)
-            lineTo(cx + direction * size, cy + size * 0.62f)
-            lineTo(cx + direction * size, cy + size * 0.22f)
-            lineTo(cx - direction * size * 0.78f, cy + size * 0.22f)
-            lineTo(cx - direction * size * 0.78f, cy - size * 0.22f)
-            lineTo(cx + direction * size, cy - size * 0.22f)
-            close()
-        }
-        canvas.drawPath(arrow, paint)
     }
 
     private fun drawLead(

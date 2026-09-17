@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.example.carrothud">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Android Auto Surface 렌더링 필수 -->
+    <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
+
+    <!-- NavigationTemplate 사용 -->
     <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
 
     <application
@@ -13,31 +17,40 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
 
-        <!-- 안드로이드 오토 인식 메타데이터 -->
+        <!-- Android Auto 앱 선언 -->
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />
+
+        <!-- 최소 Car App API -->
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="1" />
 
         <service
             android:name="com.example.carrothud.CarrotCarAppService"
             android:exported="true"
             android:label="당근HUD">
+
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
                 <category android:name="androidx.car.app.category.NAVIGATION" />
-                <category android:name="com.google.android.gms.car.category.CATEGORY_PROJECTION_DEFAULT" />
             </intent-filter>
+
         </service>
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="당근HUD">
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
         </activity>
 
     </application>
+
 </manifest>

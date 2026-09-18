@@ -1,7 +1,11 @@
 name: Build Android APK
 
 
+
+
 on: [push]
+
+
 
 
 jobs:
@@ -25,6 +29,11 @@ jobs:
           mkdir -p /tmp/carrot-motion-check
           javac -d /tmp/carrot-motion-check app/src/main/java/com/example/carrothud/RoadMotion.java tests/RoadMotionCheck.java
           java -cp /tmp/carrot-motion-check RoadMotionCheck
+      - name: Inspect official Kakao navigation SDK
+        run: |
+          curl --fail --connect-timeout 15 --max-time 90 -o /tmp/knsdk-ui.aar https://devrepo.kakaomobility.com/repository/kakao-mobility-android-knsdk-public/com/kakaomobility/knsdk/knsdk_ui/1.12.7/knsdk_ui-1.12.7.aar
+          unzip -p /tmp/knsdk-ui.aar classes.jar > /tmp/knsdk-ui.jar
+          jar tf /tmp/knsdk-ui.jar | grep -E 'KNSDK|KNPOI|KNLanguageType|KNNaviView.class|KNGuidance.class|KNRoutePriority'
       - name: Build Debug APK
         run: gradle assembleDebug
       - name: Upload APK Artifact
@@ -32,4 +41,6 @@ jobs:
         with:
           name: CarrotHUD-APK
           path: app/build/outputs/apk/debug/app-debug.apk
+
+
 

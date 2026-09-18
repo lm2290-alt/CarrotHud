@@ -488,37 +488,49 @@ class CarrotMainScreen(
 
             val s = state
 
-            drawRoadBackground(canvas, width, height)
+            // Experimental Android Auto split layout. The left pane is reserved for the
+            // Kakao embedded navigation view; the right pane remains the live Carrot HUD.
+            val splitX = width * 0.5f
+            drawKakaoPanePlaceholder(canvas, splitX, height)
 
-            drawRoadMotion(canvas, width, height, s.speedKph)
+            canvas.save()
+            canvas.clipRect(splitX, 0f, width, height)
+            canvas.translate(splitX, 0f)
+            val hudWidth = width - splitX
+
+            drawRoadBackground(canvas, hudWidth, height)
+
+            drawRoadMotion(canvas, hudWidth, height, s.speedKph)
 
             drawRoad(
                 canvas,
-                width,
+                hudWidth,
                 height,
                 s
             )
 
             drawLead(
                 canvas,
-                width,
+                hudWidth,
                 height,
                 s
             )
 
             drawSpeed(
                 canvas,
-                width,
+                hudWidth,
                 height,
                 s
             )
 
             drawStatus(
                 canvas,
-                width,
+                hudWidth,
                 height,
                 s
             )
+
+            canvas.restore()
 
         } catch (t: Throwable) {
             Log.e(TAG, "HUD renderer failed", t)
@@ -529,6 +541,45 @@ class CarrotMainScreen(
                 }
             }
         }
+    }
+
+    /** Placeholder replaced by the Kakao KNNaviView once the native app key is configured. */
+    private fun drawKakaoPanePlaceholder(canvas: Canvas, width: Float, height: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(235, 237, 234)
+        canvas.drawRect(0f, 0f, width, height, paint)
+
+        paint.color = Color.rgb(206, 210, 205)
+        for (i in 0..7) {
+            val y = height * (i / 7f)
+            canvas.drawRect(0f, y, width, y + max(1f, height * 0.003f), paint)
+        }
+        for (i in 0..5) {
+            val x = width * (i / 5f)
+            canvas.drawRect(x, 0f, x + max(1f, width * 0.004f), height, paint)
+        }
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = max(6f, width * 0.018f)
+        paint.color = Color.rgb(255, 214, 0)
+        val route = Path().apply {
+            moveTo(width * 0.12f, height * 0.82f)
+            cubicTo(width * 0.28f, height * 0.64f, width * 0.34f, height * 0.38f, width * 0.53f, height * 0.47f)
+            cubicTo(width * 0.69f, height * 0.54f, width * 0.72f, height * 0.22f, width * 0.88f, height * 0.14f)
+        }
+        canvas.drawPath(route, paint)
+
+        paint.style = Paint.Style.FILL
+        paint.textAlign = Paint.Align.CENTER
+        paint.isFakeBoldText = true
+        paint.color = Color.rgb(35, 38, 40)
+        paint.textSize = max(24f, height * 0.055f)
+        canvas.drawText("KAKAO NAVI", width * 0.5f, height * 0.12f, paint)
+        paint.isFakeBoldText = false
+        paint.color = Color.rgb(95, 99, 102)
+        paint.textSize = max(16f, height * 0.030f)
+        canvas.drawText("APP KEY REQUIRED", width * 0.5f, height * 0.18f, paint)
     }
 
     /** All geometry uses normalized screen coordinates, so wide OEM surfaces never stretch a bitmap. */
@@ -637,8 +688,12 @@ class CarrotMainScreen(
                 val t1 = (t0 + 0.055f + t0 * 0.065f).coerceAtMost(1f)
                 val y0 = height * (0.27f + t0 * t0 * 0.79f)
                 val y1 = height * (0.27f + t1 * t1 * 0.79f)
-                val x0 = width * (0.5f + lane * t0)
-                val x1 = width * (0.5f + lane * t1)
+                // Tie horizontal perspective to the final screen Y coordinate. Using t here
+                // while Y used t squared made every dashed lane bow outward on wide screens.
+                val yDepth0 = ((y0 / height) - 0.27f) / 0.79f
+                val yDepth1 = ((y1 / height) - 0.27f) / 0.79f
+                val x0 = width * (0.5f + lane * yDepth0)
+                val x1 = width * (0.5f + lane * yDepth1)
                 paint.strokeWidth = max(2f, width * (0.0012f + t0 * 0.004f))
                 canvas.drawLine(x0, y0, x1, y1, paint)
             }
@@ -810,9 +865,11 @@ class CarrotMainScreen(
     ) {
         val vehicleBitmap = if (ego) egoVehicleBitmap else leadVehicleBitmap
         if (vehicleBitmap != null) {
-            // Width is always derived from source aspect ratio: never stretch on the Niro wide display.
-            val drawnHeight = carH
-            val drawnWidth = drawnHeight * vehicleBitmap.width / vehicleBitmap.height
+            // Fit inside both bounds while preserving aspect ratio. This keeps the new
+            // three-quarter 3D sprites from growing wider on the Niro's panoramic surface.
+            val bitmapAspect = vehicleBitmap.width.toFloat() / vehicleBitmap.height.toFloat()
+            val drawnWidth = min(carW, carH * bitmapAspect)
+            val drawnHeight = drawnWidth / bitmapAspect
             val destination = RectF(
                 cx - drawnWidth / 2f,
                 cy - drawnHeight / 2f,
@@ -893,16 +950,24 @@ class CarrotMainScreen(
     ) {
         val d = s.leadDistance ?: return
 
-        // Perspective correction: the previous mapping made a 29 m lead overlap the ego car.
-        val visualDistance = (d * 1.75f).coerceIn(8f, 120f)
+        // Keep the real distance motion. Only the final screen position is clamped below so
+        // a very close lead never overlaps the ego sprite.
+        val visualDistance = d.coerceIn(0f, 120f)
         val point = projectWorld(visualDistance, 0f, width, height) ?: return
         val normalized = (d / 120f).coerceIn(0.05f, 1f)
         // Larger, distance-aware lead while retaining a sensible far-distance floor.
         val carH = height * (0.19f - normalized * 0.11f)
-        val carW = carH * leadVehicleBitmap.width / leadVehicleBitmap.height
+        // Preserve the previous on-screen width even though the new 3D sprite is wider.
+        val carW = carH * 0.98f
+        val leadAspect = leadVehicleBitmap.width.toFloat() / leadVehicleBitmap.height.toFloat()
+        val leadDrawnW = min(carW, carH * leadAspect)
+        val leadDrawnH = leadDrawnW / leadAspect
         val leadBob = sin(SystemClock.uptimeMillis() / 210.0).toFloat() * height * 0.0014f
-        val egoTop = height * (0.75f - 0.31f / 2f)
-        val maximumLeadCenterY = egoTop - height * 0.025f - carH / 2f
+        val egoAspect = egoVehicleBitmap.width.toFloat() / egoVehicleBitmap.height.toFloat()
+        val egoDrawnW = min(width * 0.115f, height * 0.31f * egoAspect)
+        val egoDrawnH = egoDrawnW / egoAspect
+        val egoTop = height * 0.75f - egoDrawnH / 2f
+        val maximumLeadCenterY = egoTop - height * 0.025f - leadDrawnH / 2f
         val leadCenterY = min(point.y + leadBob, maximumLeadCenterY)
         drawTopDownCar(canvas, point.x, leadCenterY, carW, carH, false)
     }

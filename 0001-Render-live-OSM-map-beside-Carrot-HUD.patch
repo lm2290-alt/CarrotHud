@@ -650,10 +650,10 @@ index 3b18577..eb50f1a 100644
              paint
 diff --git a/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
 new file mode 100644
-index 0000000..3dbc212
+index 0000000..871c6d3
 --- /dev/null
 +++ b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,188 @@
 +package com.example.carrothud
 +
 +import android.Manifest
@@ -727,6 +727,11 @@ index 0000000..3dbc212
 +            val type=setter.parameterTypes[0]
 +            val methods=type.methods.associateWith { method ->
 +                nav.javaClass.methods.firstOrNull { it.name==method.name && it.parameterTypes.contentEquals(method.parameterTypes) }
++                    // SDK 1.12.7 adds route-change details to the delegate; its UI still
++                    // takes the documented guidance-only callback.
++                    ?: nav.javaClass.methods.firstOrNull { method.name=="guidanceRouteChanged" &&
++                        it.name==method.name && it.parameterCount==1 &&
++                        it.parameterTypes[0]==method.parameterTypes[0] }
 +                    ?: nav.javaClass.methods.firstOrNull { method.name=="guidanceGuideEnded" && it.name==method.name && it.parameterCount==2 }
 +                    ?: error("Unsupported Kakao callback: ${method.name}")
 +            }
@@ -738,7 +743,7 @@ index 0000000..3dbc212
 +                    else -> {
 +                        val target=checkNotNull(methods[method])
 +                        val values=args ?: emptyArray()
-+                        if(target.parameterCount==values.size) target.invoke(nav,*values)
++                        if(target.parameterCount<=values.size) target.invoke(nav,*values.take(target.parameterCount).toTypedArray())
 +                        else target.invoke(nav,*values,false)
 +                    }
 +                }
@@ -1271,10 +1276,10 @@ index 0000000..aa5b58d
 +}
 diff --git a/tests/verify_kakao_callbacks.py b/tests/verify_kakao_callbacks.py
 new file mode 100644
-index 0000000..763fdf0
+index 0000000..db708bb
 --- /dev/null
 +++ b/tests/verify_kakao_callbacks.py
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,74 @@
 +"""Validate reflection bridge against the pinned SDK's public JVM method descriptors."""
 +import io
 +import struct
@@ -1331,6 +1336,7 @@ index 0000000..763fdf0
 +    setters = ("setGuideStateDelegate", "setLocationGuideDelegate", "setRouteGuideDelegate",
 +               "setSafetyGuideDelegate", "setVoiceGuideDelegate", "setCitsGuideDelegate")
 +    checked = 0
++    missing = []
 +    for setter in setters:
 +        descriptor = next(desc for _, name, desc in guidance if name == setter)
 +        interface = descriptor[2:descriptor.index(";")]
@@ -1340,7 +1346,11 @@ index 0000000..763fdf0
 +            matched = (name, desc) in view
 +            if name == "guidanceGuideEnded":
 +                matched |= (name, desc.replace(")", "Z)", 1)) in view
-+            assert matched, f"Missing KNNaviView callback: {name}{desc}"
++            if name == "guidanceRouteChanged":
++                matched |= (name, "(" + desc[1:desc.index(";")+1] + ")V") in view
++            if not matched:
++                missing.append(f"{name}{desc}")
 +            checked += 1
++    assert not missing, "Missing KNNaviView callbacks:\n" + "\n".join(missing)
 +    assert checked >= 10, "incomplete callback inspection"
 +    print(f"Kakao callback bridge verified: {checked} callbacks")

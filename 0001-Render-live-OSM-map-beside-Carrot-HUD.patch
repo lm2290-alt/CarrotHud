@@ -1,3 +1,39 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index ff0a993..a37491d 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,8 +11,8 @@ android {
+         applicationId = "com.example.carrothud"
+         minSdk = 26
+         targetSdk = 34
+-        versionCode = 1
+-        versionName = "1.0"
++        versionCode = 156
++        versionName = "1.2.0-preview"
+ 
+         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+     }
+@@ -28,16 +28,17 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility = JavaVersion.VERSION_1_8
+-        targetCompatibility = JavaVersion.VERSION_1_8
++        sourceCompatibility = JavaVersion.VERSION_11
++        targetCompatibility = JavaVersion.VERSION_11
+     }
+ 
+     kotlinOptions {
+-        jvmTarget = "1.8"
++        jvmTarget = "11"
+     }
+ }
+ 
+ dependencies {
++    implementation("com.kakaomobility.knsdk:knsdk_ui:1.12.7")
+     implementation("androidx.core:core-ktx:1.12.0")
+     implementation("androidx.appcompat:appcompat:1.6.1")
+     implementation("com.google.android.material:material:1.11.0")
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
 index 80f6b61..e7f043a 100644
 --- a/app/src/main/AndroidManifest.xml
@@ -12,7 +48,7 @@ index 80f6b61..e7f043a 100644
      <!-- Android Auto Surface 렌더링 필수 -->
      <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
 diff --git a/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt b/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
-index 3b18577..aacfb1f 100644
+index 3b18577..584495f 100644
 --- a/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
 +++ b/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
 @@ -1,5 +1,9 @@
@@ -56,11 +92,20 @@ index 3b18577..aacfb1f 100644
  
  class CarrotMainScreen(
      carContext: CarContext
-@@ -84,6 +98,17 @@ class CarrotMainScreen(
+@@ -53,6 +67,7 @@ class CarrotMainScreen(
+         val leadRelSpeed: Float = 0f,
+         val leftBlinker: Boolean = false,
+         val rightBlinker: Boolean = false,
++        val steeringAngle: Float = 0f,
+         val pathX: FloatArray = floatArrayOf(),
+         val pathY: FloatArray = floatArrayOf(),
+         val laneLines: List<Pair<FloatArray, FloatArray>> = emptyList(),
+@@ -84,6 +99,18 @@ class CarrotMainScreen(
          .build()
  
      private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 +    private val roadMotion = RoadMotion()
++    private val vehicleMeshes = VehicleMeshRenderer()
 +    private val mapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 +    private val tileCache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
 +        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
@@ -74,7 +119,7 @@ index 3b18577..aacfb1f 100644
      private val egoVehicleBitmap =
          BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_de_3d)
      private val leadVehicleBitmap =
-@@ -101,12 +126,34 @@ class CarrotMainScreen(
+@@ -101,12 +128,34 @@ class CarrotMainScreen(
                  e
              )
          }
@@ -109,7 +154,24 @@ index 3b18577..aacfb1f 100644
          rendering = true
  
          startRenderer()
-@@ -488,10 +535,8 @@ class CarrotMainScreen(
+@@ -327,7 +376,7 @@ class CarrotMainScreen(
+         val cluster = c.f32()
+         val cruise = c.f32()
+ 
+-        c.f32() // steeringAngleDeg
++        val steeringAngle = c.f32()
+         c.bool() // brakeHoldActive
+         c.i16() // softHoldActive
+         c.i16() // carrotCruise
+@@ -355,6 +404,7 @@ class CarrotMainScreen(
+             cruiseKph = cruiseKph,
+             leftBlinker = leftBlinker,
+             rightBlinker = rightBlinker,
++            steeringAngle = if (steeringAngle.isFinite()) steeringAngle else 0f,
+             connected = true
+         )
+     }
+@@ -488,10 +538,8 @@ class CarrotMainScreen(
  
              val s = state
  
@@ -121,7 +183,7 @@ index 3b18577..aacfb1f 100644
  
              canvas.save()
              canvas.clipRect(splitX, 0f, width, height)
-@@ -500,7 +545,7 @@ class CarrotMainScreen(
+@@ -500,7 +548,7 @@ class CarrotMainScreen(
  
              drawRoadBackground(canvas, hudWidth, height)
  
@@ -130,7 +192,7 @@ index 3b18577..aacfb1f 100644
  
              drawRoad(
                  canvas,
-@@ -543,43 +588,105 @@ class CarrotMainScreen(
+@@ -543,43 +591,105 @@ class CarrotMainScreen(
          }
      }
  
@@ -261,7 +323,7 @@ index 3b18577..aacfb1f 100644
      }
  
      /** All geometry uses normalized screen coordinates, so wide OEM surfaces never stretch a bitmap. */
-@@ -587,30 +694,16 @@ class CarrotMainScreen(
+@@ -587,30 +697,16 @@ class CarrotMainScreen(
          paint.style = Paint.Style.FILL
          paint.shader = LinearGradient(
              0f, 0f, 0f, height,
@@ -294,7 +356,7 @@ index 3b18577..aacfb1f 100644
              Shader.TileMode.CLAMP
          )
          canvas.drawPath(Path().apply {
-@@ -675,9 +768,7 @@ class CarrotMainScreen(
+@@ -675,9 +771,7 @@ class CarrotMainScreen(
  
      /** Moving perspective markers provide continuous forward-motion depth at the live vehicle speed. */
      private fun drawRoadMotion(canvas: Canvas, width: Float, height: Float, speedKph: Float) {
@@ -305,7 +367,7 @@ index 3b18577..aacfb1f 100644
  
          paint.style = Paint.Style.STROKE
          paint.strokeCap = Paint.Cap.ROUND
-@@ -830,19 +921,14 @@ class CarrotMainScreen(
+@@ -830,19 +924,14 @@ class CarrotMainScreen(
          s: HudState
      ) {
          val cx = width * 0.5f
@@ -327,23 +389,53 @@ index 3b18577..aacfb1f 100644
              height * 0.31f,
              true,
              s.enabled,
-@@ -962,13 +1048,12 @@ class CarrotMainScreen(
-         val leadAspect = leadVehicleBitmap.width.toFloat() / leadVehicleBitmap.height.toFloat()
-         val leadDrawnW = min(carW, carH * leadAspect)
-         val leadDrawnH = leadDrawnW / leadAspect
+@@ -862,6 +951,24 @@ class CarrotMainScreen(
+         enabled: Boolean = false,
+         leftBlinker: Boolean = false,
+         rightBlinker: Boolean = false
++    ) {
++        val yaw = if (ego && state.connected && state.speedKph > .5f)
++            (state.steeringAngle / 18f).coerceIn(-8f,8f) else 0f
++        vehicleMeshes.draw(canvas, RectF(cx-carW/2,cy-carH/2,cx+carW/2,cy+carH/2),
++            ego,yaw,leftBlinker,rightBlinker)
++    }
++
++    // Retained only as a legacy reference; the live renderer never calls this sprite path.
++    private fun drawLegacySpriteCar(
++        canvas: Canvas,
++        cx: Float,
++        cy: Float,
++        carW: Float,
++        carH: Float,
++        ego: Boolean,
++        enabled: Boolean = false,
++        leftBlinker: Boolean = false,
++        rightBlinker: Boolean = false
+     ) {
+         val vehicleBitmap = if (ego) egoVehicleBitmap else leadVehicleBitmap
+         if (vehicleBitmap != null) {
+@@ -959,16 +1066,10 @@ class CarrotMainScreen(
+         val carH = height * (0.19f - normalized * 0.11f)
+         // Preserve the previous on-screen width even though the new 3D sprite is wider.
+         val carW = carH * 0.98f
+-        val leadAspect = leadVehicleBitmap.width.toFloat() / leadVehicleBitmap.height.toFloat()
+-        val leadDrawnW = min(carW, carH * leadAspect)
+-        val leadDrawnH = leadDrawnW / leadAspect
 -        val leadBob = sin(SystemClock.uptimeMillis() / 210.0).toFloat() * height * 0.0014f
-         val egoAspect = egoVehicleBitmap.width.toFloat() / egoVehicleBitmap.height.toFloat()
+-        val egoAspect = egoVehicleBitmap.width.toFloat() / egoVehicleBitmap.height.toFloat()
 -        val egoDrawnW = min(width * 0.115f, height * 0.31f * egoAspect)
-+        val egoDrawnW = min(width * 0.25f, height * 0.31f * egoAspect)
-         val egoDrawnH = egoDrawnW / egoAspect
-         val egoTop = height * 0.75f - egoDrawnH / 2f
-         val maximumLeadCenterY = egoTop - height * 0.025f - leadDrawnH / 2f
+-        val egoDrawnH = egoDrawnW / egoAspect
+-        val egoTop = height * 0.75f - egoDrawnH / 2f
+-        val maximumLeadCenterY = egoTop - height * 0.025f - leadDrawnH / 2f
 -        val leadCenterY = min(point.y + leadBob, maximumLeadCenterY)
++        // Full mesh fit bounds are conservative even when yaw changes its projected aspect.
++        val egoTop = height * 0.75f - height * 0.31f / 2f
++        val maximumLeadCenterY = egoTop - height * 0.025f - carH / 2f
 +        val leadCenterY = min(point.y, maximumLeadCenterY)
          drawTopDownCar(canvas, point.x, leadCenterY, carW, carH, false)
      }
  
-@@ -1057,9 +1142,9 @@ class CarrotMainScreen(
+@@ -1057,9 +1158,9 @@ class CarrotMainScreen(
  
          canvas.drawText(
              if (s.connected)
@@ -414,6 +506,226 @@ index 0000000..b521cc4
 +        previousMillis = -1;
 +    }
 +}
+diff --git a/app/src/main/java/com/example/carrothud/VehicleMesh.java b/app/src/main/java/com/example/carrothud/VehicleMesh.java
+new file mode 100644
+index 0000000..e59369a
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/VehicleMesh.java
+@@ -0,0 +1,133 @@
++package com.example.carrothud;
++
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++
++/** Actual XYZ mesh, not a pre-rendered image. Procedural DE-style crossover prototype.
++ * Not an OEM CAD model. Coordinates are metres: X right, Y up, Z forward.
++ */
++public final class VehicleMesh {
++    public static final int BODY = 0, GLASS = 1, TRIM = 2, WHEEL = 3,
++            ALLOY = 4, TAIL = 5, LEFT_SIGNAL = 6, RIGHT_SIGNAL = 7;
++    public static final class Face {
++        public final double[][] vertices;
++        public final int material;
++        Face(int material, double[]... vertices) {
++            this.material = material;
++            this.vertices = vertices;
++        }
++    }
++    public static final class ProjectedFace {
++        public final double[] x, y;
++        public final double depth, light;
++        public final int material;
++        ProjectedFace(double[] x, double[] y, double depth, double light, int material) {
++            this.x = x; this.y = y; this.depth = depth; this.light = light;
++            this.material = material;
++        }
++    }
++    private final List<Face> faces = new ArrayList<>();
++
++    public VehicleMesh(boolean crossover) {
++        double length = crossover ? 4.375 : 4.7;
++        double rear = -length / 2, front = length / 2;
++        // Rounded shoulder sections, black lower cladding, white body panels.
++        hull(new double[]{rear, rear+.25, front-.35, front},
++                new double[]{.77,.90,.88,.73}, .38,.58, TRIM);
++        hull(new double[]{rear, rear+.25, front-.35, front},
++                new double[]{.77,.90,.88,.73}, .58,1.08, BODY);
++        double roof = crossover ? 1.57 : 1.39;
++        double[] a = {-0.77,1.08,rear+.20}, b = {.77,1.08,rear+.20};
++        double[] c = {-.65,roof,rear+.85}, d = {.65,roof,rear+.85};
++        double[] e = {-.65,roof,.48}, f = {.65,roof,.48};
++        double[] g = {-.78,1.08,1.25}, h = {.78,1.08,1.25};
++        face(GLASS,a,b,d,c); face(BODY,c,d,f,e); face(GLASS,e,f,h,g);
++        face(GLASS,a,c,e,g); face(GLASS,b,h,f,d);
++        // Narrow pillars and roof rails, distinct rear spoiler on the crossover.
++        box(-.70,.70,roof,roof+.045,rear+.81,.53,BODY);
++        box(-.75,.75,roof-.06,roof+.025,rear+.73,rear+.90,TRIM);
++        for (double side : new double[]{-1,1}) {
++            double x = side*.735;
++            box(x-.035,x+.035,1.1,roof-.02,-.45,-.34,TRIM);
++            box(side*.91-.09,side*.91+.09,1.03,1.15,.52,.78,BODY);
++            for (double z : new double[]{rear+.72,front-.76}) wheel(side*.88,.35,z);
++        }
++        // Horizontal DE-style tail lamps, signals on the rear bumper (no floating arrows).
++        box(-.76,-.34,.91,1.03,rear-.025,rear+.02,TAIL);
++        box(.34,.76,.91,1.03,rear-.025,rear+.02,TAIL);
++        box(-.74,-.49,.54,.63,rear-.03,rear+.01,LEFT_SIGNAL);
++        box(.49,.74,.54,.63,rear-.03,rear+.01,RIGHT_SIGNAL);
++        box(-.25,.25,.66,.78,rear-.03,rear,TRIM);
++        box(-.62,.62,.36,.43,rear-.04,rear+.05,ALLOY);
++    }
++    private void face(int material,double[]... vertices) { faces.add(new Face(material,vertices)); }
++    private void box(double x0,double x1,double y0,double y1,double z0,double z1,int m) {
++        double[] a={x0,y0,z0},b={x1,y0,z0},c={x1,y1,z0},d={x0,y1,z0};
++        double[] e={x0,y0,z1},f={x1,y0,z1},g={x1,y1,z1},h={x0,y1,z1};
++        face(m,a,b,c,d); face(m,e,h,g,f); face(m,a,d,h,e);
++        face(m,b,f,g,c); face(m,d,c,g,h); face(m,a,e,f,b);
++    }
++    private void hull(double[] zs,double[] widths,double low,double high,int material) {
++        double[][] prev=null;
++        for(int k=0;k<zs.length;k++) {
++            double w=widths[k], z=zs[k];
++            double[][] ring={{-w*.85,low,z},{w*.85,low,z},{w,low+.10,z},
++                {w,high-.12,z},{w*.84,high,z},{-w*.84,high,z},
++                {-w,high-.12,z},{-w,low+.10,z}};
++            if(prev==null) face(material,ring);
++            else for(int i=0;i<8;i++) face(material,prev[i],prev[(i+1)%8],ring[(i+1)%8],ring[i]);
++            prev=ring;
++        }
++        face(material,prev);
++    }
++    private void wheel(double x,double y,double z) {
++        int n=16;
++        double outer=x+Math.signum(x)*.11, inner=x-Math.signum(x)*.11;
++        double[][] cap=new double[n][];
++        for(int i=0;i<n;i++) {
++            double t=i*2*Math.PI/n, u=(i+1)*2*Math.PI/n;
++            double[] a={outer,y+Math.sin(t)*.33,z+Math.cos(t)*.33};
++            double[] b={outer,y+Math.sin(u)*.33,z+Math.cos(u)*.33};
++            cap[i]=a;
++            face(WHEEL,a,b,new double[]{inner,b[1],b[2]},new double[]{inner,a[1],a[2]});
++        }
++        face(WHEEL,cap);
++        double[][] rim=new double[n][];
++        for(int i=0;i<n;i++) {
++            double t=i*2*Math.PI/n;
++            rim[i]=new double[]{outer+Math.signum(x)*.006,y+Math.sin(t)*.22,z+Math.cos(t)*.22};
++        }
++        face(ALLOY,rim);
++    }
++
++    /** Perspective projection with a fixed rear camera. One uniform scale preserves shape. */
++    public List<ProjectedFace> project(double yawDegrees) {
++        double yaw=Math.toRadians(Math.max(-12,Math.min(12,yawDegrees)));
++        double sy=Math.sin(yaw),cy=Math.cos(yaw), pitch=.42;
++        List<ProjectedFace> result=new ArrayList<>();
++        for(Face face:faces) {
++            int n=face.vertices.length;
++            double[] xs=new double[n],ys=new double[n];
++            double[][] rotated=new double[n][3];
++            double depth=0;
++            for(int i=0;i<n;i++) {
++                double[] v=face.vertices[i];
++                double x=v[0]*cy+v[2]*sy,z=-v[0]*sy+v[2]*cy,y=v[1]-.7;
++                rotated[i]=new double[]{x,y,z};
++                double cz=z*Math.cos(pitch)-y*Math.sin(pitch)+8;
++                xs[i]=x/cz; ys[i]=-(y*Math.cos(pitch)+z*Math.sin(pitch))/cz;
++                depth+=cz/n;
++            }
++            double[] a=rotated[0],b=rotated[1],c=rotated[2];
++            double ux=b[0]-a[0],uy=b[1]-a[1],uz=b[2]-a[2];
++            double vx=c[0]-a[0],vy=c[1]-a[1],vz=c[2]-a[2];
++            double nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
++            double norm=Math.sqrt(nx*nx+ny*ny+nz*nz);
++            double light=norm<1e-8?.8:.64+.36*Math.abs((nx*.3+ny*.8-nz*.5)/norm);
++            result.add(new ProjectedFace(xs,ys,depth,Math.min(1,light),face.material));
++        }
++        result.sort(Comparator.comparingDouble((ProjectedFace f)->f.depth).reversed());
++        return result;
++    }
++}
+diff --git a/app/src/main/java/com/example/carrothud/VehicleMeshRenderer.kt b/app/src/main/java/com/example/carrothud/VehicleMeshRenderer.kt
+new file mode 100644
+index 0000000..6e292c8
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/VehicleMeshRenderer.kt
+@@ -0,0 +1,62 @@
++package com.example.carrothud
++
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.Paint
++import android.graphics.Path
++import android.graphics.RectF
++import kotlin.math.min
++
++/** Software 3D rasterizer for the AA Canvas; no offscreen screenshots or sprites. */
++class VehicleMeshRenderer {
++    private val crossover = VehicleMesh(true)
++    private val sedan = VehicleMesh(false)
++    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val path = Path()
++    private var cachedYaw = Double.NaN
++    private var egoFaces = crossover.project(0.0)
++    private val leadFaces = sedan.project(0.0)
++
++    fun draw(canvas: Canvas, bounds: RectF, ego: Boolean, yaw: Float,
++             leftSignal: Boolean, rightSignal: Boolean) {
++        val angle = (yaw * 2).toInt() / 2.0
++        if (ego && angle != cachedYaw) {
++            egoFaces = crossover.project(angle)
++            cachedYaw = angle
++        }
++        val faces = if (ego) egoFaces else leadFaces
++        val minX = faces.minOf { it.x.minOrNull()!! }
++        val maxX = faces.maxOf { it.x.maxOrNull()!! }
++        val minY = faces.minOf { it.y.minOrNull()!! }
++        val maxY = faces.maxOf { it.y.maxOrNull()!! }
++        val scale = min(bounds.width() / (maxX-minX), bounds.height() / (maxY-minY))
++        val cx = (minX+maxX)/2
++        val cy = (minY+maxY)/2
++        paint.style = Paint.Style.FILL
++        for (face in faces) {
++            path.rewind()
++            for (i in face.x.indices) {
++                val x = (bounds.centerX()+(face.x[i]-cx)*scale).toFloat()
++                val y = (bounds.centerY()+(face.y[i]-cy)*scale).toFloat()
++                if (i == 0) path.moveTo(x,y) else path.lineTo(x,y)
++            }
++            path.close()
++            val base = when (face.material) {
++                VehicleMesh.BODY -> if (ego) Color.rgb(247,248,248) else Color.rgb(137,145,151)
++                VehicleMesh.GLASS -> Color.rgb(35,46,55)
++                VehicleMesh.TRIM -> Color.rgb(43,47,50)
++                VehicleMesh.WHEEL -> Color.rgb(23,25,27)
++                VehicleMesh.ALLOY -> Color.rgb(165,172,177)
++                VehicleMesh.TAIL -> Color.rgb(165,23,29)
++                VehicleMesh.LEFT_SIGNAL -> if (leftSignal) Color.rgb(255,171,14) else Color.rgb(88,53,25)
++                VehicleMesh.RIGHT_SIGNAL -> if (rightSignal) Color.rgb(255,171,14) else Color.rgb(88,53,25)
++                else -> Color.GRAY
++            }
++            val light = if ((face.material == VehicleMesh.LEFT_SIGNAL && leftSignal) ||
++                (face.material == VehicleMesh.RIGHT_SIGNAL && rightSignal)) 1.0 else face.light
++            paint.color = Color.rgb((Color.red(base)*light).toInt(),
++                (Color.green(base)*light).toInt(),(Color.blue(base)*light).toInt())
++            canvas.drawPath(path,paint)
++        }
++    }
++}
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index b793fa7..ef183fe 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -10,6 +10,8 @@ dependencyResolutionManagement {
+     repositories {
+         google()
+         mavenCentral()
++        maven { url = uri("https://devrepo.kakaomobility.com/repository/kakao-mobility-android-knsdk-public/") }
++        maven { url = uri("https://www.jitpack.io") }
+     }
+ }
+ 
 diff --git a/tests/RoadMotionCheck.java b/tests/RoadMotionCheck.java
 new file mode 100644
 index 0000000..f336816
@@ -442,5 +754,35 @@ index 0000000..f336816
 +        motion.pause();
 +        same(motion.advance(999999, 72, true), moving + 2f / 35f);
 +        System.out.println("PASS: stop, movement, speed change, disconnect, noise, invalid speed, resume");
++    }
++}
+diff --git a/tests/VehicleMeshCheck.java b/tests/VehicleMeshCheck.java
+new file mode 100644
+index 0000000..aa5b58d
+--- /dev/null
++++ b/tests/VehicleMeshCheck.java
+@@ -0,0 +1,24 @@
++import com.example.carrothud.VehicleMesh;
++public class VehicleMeshCheck {
++    public static void main(String[] args) {
++        for (boolean ego : new boolean[]{true,false}) {
++            VehicleMesh mesh = new VehicleMesh(ego);
++            for (double yaw : new double[]{-12,0,12}) {
++                double previous=Double.POSITIVE_INFINITY;
++                int faces=0;
++                for(VehicleMesh.ProjectedFace f:mesh.project(yaw)) {
++                    if(f.depth>previous) throw new AssertionError("depth sorting");
++                    previous=f.depth;
++                    if(f.light<0 || f.light>1) throw new AssertionError("lighting");
++                    for(int i=0;i<f.x.length;i++) {
++                        if(!Double.isFinite(f.x[i]) || !Double.isFinite(f.y[i]))
++                            throw new AssertionError("invalid projection");
++                    }
++                    faces++;
++                }
++                if(faces<100) throw new AssertionError("missing mesh");
++            }
++        }
++        System.out.println("Vehicle mesh checks passed");
 +    }
 +}

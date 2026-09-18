@@ -1,3 +1,56 @@
+diff --git a/NAVIGATION_PREVIEW.md b/NAVIGATION_PREVIEW.md
+new file mode 100644
+index 0000000..10c9ae3
+--- /dev/null
++++ b/NAVIGATION_PREVIEW.md
+@@ -0,0 +1,47 @@
++# CarrotHUD 1.2 navigation preview
++
++This is an experimental integration, not a verified vehicle navigation release.
++
++## Implemented
++
++- Perspective-projected XYZ vehicle meshes (white crossover and separate grey sedan),
++  shaded faces and model-attached turn signals. The crossover is a procedural
++  DE-style approximation, not a licensed or dimensionally verified Kia CAD asset.
++- Distance-driven lane motion, frozen at zero/invalid speed or disconnection.
++- Conservative mesh bounding boxes keep the lead from overlapping the ego vehicle.
++- Official Kakao `knsdk_ui:1.12.7`, with initialization, route request and guidance
++  callbacks forwarded to `KNNaviView`.
++- Private own-content Android virtual display renders the embedded navigation
++  view and HUD to the AA surface. No other app is captured or embedded.
++- Phone-only native-key, current signing-key hash and destination coordinate setup.
++  The key is not in the repository and application backup is disabled.
++
++## Setup / limitations
++
++1. While parked, open the phone app and choose **카카오 내비 설정**.
++2. Register package `com.example.carrothud` and the displayed current APK key hash
++   in Kakao Developers. CI debug signatures can differ between builds.
++3. Enter the native app key, optionally destination WGS84 latitude/longitude,
++   and enable the experimental AA split surface. Grant precise location.
++4. Reconnect AA. Without a destination, Kakao safety-driving mode is requested.
++   With a destination, a fresh phone location is required before route calculation.
++
++Destination search UI is not implemented. Changing an already-initialized key
++requires restarting the app process. SDK initialization failure is reported, not
++disguised by another map provider. The legacy OSM/HUD path remains available by
++turning the experimental option off. Do not treat the visualization as an ADAS
++control or substitute for the vehicle instruments.
++
++## Verification
++
++- `tests/RoadMotionCheck.java`: stopped/invalid/disconnected speed and pause checks.
++- `tests/VehicleMeshCheck.java`: finite projection, depth ordering and lighting.
++- Build validation is performed by GitHub Actions.
++- Not yet verified: Kakao authentication with the user's registered signing hash,
++  AA hardware output, SDK native-library compatibility on the user's phone,
++  touch controls, route/voice behavior and sustained frame rate on the vehicle.
++
++Official references:
++- https://developers.kakaomobility.com/guide/android-ui/start
++- https://developers.kakaomobility.com/guide/android-ui/driving.html
++- https://developer.android.com/reference/android/hardware/display/DisplayManager
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
 index ff0a993..a37491d 100644
 --- a/app/build.gradle.kts
@@ -66,7 +119,7 @@ index 80f6b61..4aa35ad 100644
              android:exported="true"
 diff --git a/app/src/main/java/com/example/carrothud/CarSurfacePresentation.kt b/app/src/main/java/com/example/carrothud/CarSurfacePresentation.kt
 new file mode 100644
-index 0000000..d035f8e
+index 0000000..b8a08a3
 --- /dev/null
 +++ b/app/src/main/java/com/example/carrothud/CarSurfacePresentation.kt
 @@ -0,0 +1,67 @@
@@ -104,7 +157,7 @@ index 0000000..d035f8e
 +            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
 +        ))
 +        display=target
-+        val p=object: Presentation(context,target.display,android.R.style.Theme_Material_Light_NoActionBar) {
++        val p=object: Presentation(context,target.display,com.google.android.material.R.style.Theme_MaterialComponents_DayNight_NoActionBar) {
 +            override fun onCreate(savedInstanceState: Bundle?) {
 +                super.onCreate(savedInstanceState)
 +                window?.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
@@ -597,10 +650,10 @@ index 3b18577..eb50f1a 100644
              paint
 diff --git a/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
 new file mode 100644
-index 0000000..e8c1972
+index 0000000..269b6df
 --- /dev/null
 +++ b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,184 @@
 +package com.example.carrothud
 +
 +import android.Manifest
@@ -643,10 +696,10 @@ index 0000000..e8c1972
 +            main.postDelayed(timeout,20000)
 +            try {
 +                install(context.applicationContext as Application)
-+                KNSDK.initializeWithAppKey(key,"1.2.0-preview",null,KNLanguageType.KNLanguageType_KOREAN) { error ->
++                initialize(key) { success ->
 +                    main.post {
 +                        if(!closed) {
-+                            if(error!=null) fail("카카오 인증·초기화 실패\n패키지명과 현재 APK 키 해시를 확인하세요")
++                            if(!success) fail("카카오 인증·초기화 실패\n패키지명과 현재 APK 키 해시를 확인하세요")
 +                            else runCatching { startNavigation() }.onFailure { fail("카카오 화면 초기화 실패\n휴대폰에서 설정을 확인한 뒤 다시 연결하세요") }
 +                        }
 +                    }
@@ -756,6 +809,27 @@ index 0000000..e8c1972
 +
 +    companion object {
 +        private var installed=false
++        private var readyKey: String?=null
++        private var loadingKey: String?=null
++        private val completions=mutableListOf<(Boolean)->Unit>()
++        private fun initialize(key: String,completion: (Boolean)->Unit) {
++            if(readyKey==key) { completion(true); return }
++            if(readyKey!=null || (loadingKey!=null && loadingKey!=key)) {
++                completion(false); return // A changed key requires a fresh process.
++            }
++            completions.add(completion)
++            if(loadingKey!=null) return
++            loadingKey=key
++            KNSDK.initializeWithAppKey(key,"1.2.0-preview",null,KNLanguageType.KNLanguageType_KOREAN) { error ->
++                Handler(Looper.getMainLooper()).post {
++                    if(error==null) readyKey=key
++                    loadingKey=null
++                    val waiting=completions.toList()
++                    completions.clear()
++                    waiting.forEach { it(error==null) }
++                }
++            }
++        }
 +        @Synchronized private fun install(application: Application) {
 +            if(!installed) {
 +                KNSDK.install(application,"${application.filesDir}/kakao-navigation")
@@ -1196,3 +1270,78 @@ index 0000000..aa5b58d
 +        System.out.println("Vehicle mesh checks passed");
 +    }
 +}
+diff --git a/tests/verify_kakao_callbacks.py b/tests/verify_kakao_callbacks.py
+new file mode 100644
+index 0000000..763fdf0
+--- /dev/null
++++ b/tests/verify_kakao_callbacks.py
+@@ -0,0 +1,69 @@
++"""Validate reflection bridge against the pinned SDK's public JVM method descriptors."""
++import io
++import struct
++import sys
++import zipfile
++
++
++def methods(data):
++    stream = io.BytesIO(data)
++    def read(n):
++        result = stream.read(n)
++        if len(result) != n:
++            raise ValueError("truncated class")
++        return result
++    def u1(): return read(1)[0]
++    def u2(): return struct.unpack(">H", read(2))[0]
++    def u4(): return struct.unpack(">I", read(4))[0]
++    assert u4() == 0xCAFEBABE
++    read(4)
++    pool = [None] * u2()
++    i = 1
++    while i < len(pool):
++        tag = u1()
++        if tag == 1:
++            pool[i] = read(u2()).decode("utf-8", errors="replace")
++        elif tag in (3, 4): read(4)
++        elif tag in (5, 6): read(8); i += 1
++        elif tag in (7, 8, 16, 19, 20): read(2)
++        elif tag in (9, 10, 11, 12, 17, 18): read(4)
++        elif tag == 15: read(3)
++        else: raise ValueError(f"unsupported constant {tag}")
++        i += 1
++    read(6)
++    read(2 * u2())
++    def attributes():
++        for _ in range(u2()):
++            read(2)
++            read(u4())
++    for _ in range(u2()):
++        read(6)
++        attributes()
++    result = []
++    for _ in range(u2()):
++        access, name, descriptor = u2(), u2(), u2()
++        result.append((access, pool[name], pool[descriptor]))
++        attributes()
++    return result
++
++
++with zipfile.ZipFile(sys.argv[1]) as archive:
++    def inspect(name): return methods(archive.read(name + ".class"))
++    guidance = inspect("com/kakaomobility/knsdk/guidance/knguidance/KNGuidance")
++    view = {(name, desc) for access, name, desc in inspect("com/kakaomobility/knsdk/ui/view/KNNaviView") if access & 1}
++    setters = ("setGuideStateDelegate", "setLocationGuideDelegate", "setRouteGuideDelegate",
++               "setSafetyGuideDelegate", "setVoiceGuideDelegate", "setCitsGuideDelegate")
++    checked = 0
++    for setter in setters:
++        descriptor = next(desc for _, name, desc in guidance if name == setter)
++        interface = descriptor[2:descriptor.index(";")]
++        for access, name, desc in inspect(interface):
++            if not access & 1 or access & 8 or name.startswith("<"):
++                continue
++            matched = (name, desc) in view
++            if name == "guidanceGuideEnded":
++                matched |= (name, desc.replace(")", "Z)", 1)) in view
++            assert matched, f"Missing KNNaviView callback: {name}{desc}"
++            checked += 1
++    assert checked >= 10, "incomplete callback inspection"
++    print(f"Kakao callback bridge verified: {checked} callbacks")

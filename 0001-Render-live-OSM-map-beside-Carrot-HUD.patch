@@ -650,10 +650,10 @@ index 3b18577..eb50f1a 100644
              paint
 diff --git a/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
 new file mode 100644
-index 0000000..269b6df
+index 0000000..3dbc212
 --- /dev/null
 +++ b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,183 @@
 +package com.example.carrothud
 +
 +import android.Manifest
@@ -667,7 +667,6 @@ index 0000000..269b6df
 +import android.widget.FrameLayout
 +import android.widget.TextView
 +import com.kakaomobility.knsdk.KNSDK
-+import com.kakaomobility.knsdk.KNLanguageType
 +import com.kakaomobility.knsdk.KNRoutePriority
 +import com.kakaomobility.knsdk.common.objects.KNPOI
 +import com.kakaomobility.knsdk.ui.view.KNNaviView
@@ -820,7 +819,7 @@ index 0000000..269b6df
 +            completions.add(completion)
 +            if(loadingKey!=null) return
 +            loadingKey=key
-+            KNSDK.initializeWithAppKey(key,"1.2.0-preview",null,KNLanguageType.KNLanguageType_KOREAN) { error ->
++            KNSDK.initializeWithAppKey(key,"1.2.0-preview") { error ->
 +                Handler(Looper.getMainLooper()).post {
 +                    if(error==null) readyKey=key
 +                    loadingKey=null

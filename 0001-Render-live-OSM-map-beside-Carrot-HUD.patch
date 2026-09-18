@@ -1,0 +1,1356 @@
+diff --git a/NAVIGATION_PREVIEW.md b/NAVIGATION_PREVIEW.md
+new file mode 100644
+index 0000000..10c9ae3
+--- /dev/null
++++ b/NAVIGATION_PREVIEW.md
+@@ -0,0 +1,47 @@
++# CarrotHUD 1.2 navigation preview
++
++This is an experimental integration, not a verified vehicle navigation release.
++
++## Implemented
++
++- Perspective-projected XYZ vehicle meshes (white crossover and separate grey sedan),
++  shaded faces and model-attached turn signals. The crossover is a procedural
++  DE-style approximation, not a licensed or dimensionally verified Kia CAD asset.
++- Distance-driven lane motion, frozen at zero/invalid speed or disconnection.
++- Conservative mesh bounding boxes keep the lead from overlapping the ego vehicle.
++- Official Kakao `knsdk_ui:1.12.7`, with initialization, route request and guidance
++  callbacks forwarded to `KNNaviView`.
++- Private own-content Android virtual display renders the embedded navigation
++  view and HUD to the AA surface. No other app is captured or embedded.
++- Phone-only native-key, current signing-key hash and destination coordinate setup.
++  The key is not in the repository and application backup is disabled.
++
++## Setup / limitations
++
++1. While parked, open the phone app and choose **카카오 내비 설정**.
++2. Register package `com.example.carrothud` and the displayed current APK key hash
++   in Kakao Developers. CI debug signatures can differ between builds.
++3. Enter the native app key, optionally destination WGS84 latitude/longitude,
++   and enable the experimental AA split surface. Grant precise location.
++4. Reconnect AA. Without a destination, Kakao safety-driving mode is requested.
++   With a destination, a fresh phone location is required before route calculation.
++
++Destination search UI is not implemented. Changing an already-initialized key
++requires restarting the app process. SDK initialization failure is reported, not
++disguised by another map provider. The legacy OSM/HUD path remains available by
++turning the experimental option off. Do not treat the visualization as an ADAS
++control or substitute for the vehicle instruments.
++
++## Verification
++
++- `tests/RoadMotionCheck.java`: stopped/invalid/disconnected speed and pause checks.
++- `tests/VehicleMeshCheck.java`: finite projection, depth ordering and lighting.
++- Build validation is performed by GitHub Actions.
++- Not yet verified: Kakao authentication with the user's registered signing hash,
++  AA hardware output, SDK native-library compatibility on the user's phone,
++  touch controls, route/voice behavior and sustained frame rate on the vehicle.
++
++Official references:
++- https://developers.kakaomobility.com/guide/android-ui/start
++- https://developers.kakaomobility.com/guide/android-ui/driving.html
++- https://developer.android.com/reference/android/hardware/display/DisplayManager
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index ff0a993..a37491d 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,8 +11,8 @@ android {
+         applicationId = "com.example.carrothud"
+         minSdk = 26
+         targetSdk = 34
+-        versionCode = 1
+-        versionName = "1.0"
++        versionCode = 156
++        versionName = "1.2.0-preview"
+ 
+         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+     }
+@@ -28,16 +28,17 @@ android {
+     }
+ 
+     compileOptions {
+-        sourceCompatibility = JavaVersion.VERSION_1_8
+-        targetCompatibility = JavaVersion.VERSION_1_8
++        sourceCompatibility = JavaVersion.VERSION_11
++        targetCompatibility = JavaVersion.VERSION_11
+     }
+ 
+     kotlinOptions {
+-        jvmTarget = "1.8"
++        jvmTarget = "11"
+     }
+ }
+ 
+ dependencies {
++    implementation("com.kakaomobility.knsdk:knsdk_ui:1.12.7")
+     implementation("androidx.core:core-ktx:1.12.0")
+     implementation("androidx.appcompat:appcompat:1.6.1")
+     implementation("com.google.android.material:material:1.11.0")
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 80f6b61..4aa35ad 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -4,6 +4,8 @@
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
++    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
++    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+ 
+     <!-- Android Auto Surface 렌더링 필수 -->
+     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
+@@ -12,7 +14,7 @@
+     <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
+ 
+     <application
+-        android:allowBackup="true"
++        android:allowBackup="false"
+         android:label="당근HUD"
+         android:supportsRtl="true"
+         android:usesCleartextTraffic="true">
+@@ -39,6 +41,7 @@
+ 
+         </service>
+ 
++        <activity android:name=".NavigationSettingsActivity" android:exported="false" />
+         <activity
+             android:name=".MainActivity"
+             android:exported="true"
+diff --git a/app/src/main/java/com/example/carrothud/CarSurfacePresentation.kt b/app/src/main/java/com/example/carrothud/CarSurfacePresentation.kt
+new file mode 100644
+index 0000000..b8a08a3
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/CarSurfacePresentation.kt
+@@ -0,0 +1,67 @@
++package com.example.carrothud
++
++import android.app.Presentation
++import android.content.Context
++import android.graphics.Canvas
++import android.graphics.Color
++import android.hardware.display.DisplayManager
++import android.hardware.display.VirtualDisplay
++import android.os.Bundle
++import android.view.View
++import android.view.WindowManager
++import android.widget.LinearLayout
++import androidx.car.app.SurfaceContainer
++
++/** Own-app views only. Does not capture the phone or embed another application's window. */
++class CarSurfacePresentation(
++    private val context: Context,
++    private val drawHud: (Canvas,Float,Float)->Unit
++) {
++    private var display: VirtualDisplay? = null
++    private var presentation: Presentation? = null
++    private var navigation: KakaoNavigationPane? = null
++
++    fun attach(container: SurfaceContainer) {
++        close()
++        val surface=requireNotNull(container.surface)
++        require(surface.isValid && container.width>0 && container.height>0)
++        val manager=context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
++        val target=checkNotNull(manager.createVirtualDisplay(
++            "CarrotHUD navigation",container.width,container.height,
++            container.dpi.coerceAtLeast(120),surface,
++            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
++        ))
++        display=target
++        val p=object: Presentation(context,target.display,com.google.android.material.R.style.Theme_MaterialComponents_DayNight_NoActionBar) {
++            override fun onCreate(savedInstanceState: Bundle?) {
++                super.onCreate(savedInstanceState)
++                window?.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
++                val row=LinearLayout(this.context).apply {
++                    orientation=LinearLayout.HORIZONTAL
++                    setBackgroundColor(Color.WHITE)
++                }
++                navigation=KakaoNavigationPane(this.context)
++                row.addView(navigation,LinearLayout.LayoutParams(0,-1,1f))
++                row.addView(object: View(this.context) {
++                    override fun onDraw(canvas: Canvas) {
++                        drawHud(canvas,width.toFloat(),height.toFloat())
++                        postInvalidateDelayed(33)
++                    }
++                },LinearLayout.LayoutParams(0,-1,1f))
++                setContentView(row)
++            }
++        }
++        presentation=p
++        p.show()
++        p.window?.setLayout(-1,-1)
++    }
++
++    fun close() {
++        navigation?.close()
++        navigation=null
++        presentation?.dismiss()
++        presentation=null
++        display?.release()
++        display=null
++    }
++}
+diff --git a/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt b/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
+index 3b18577..eb50f1a 100644
+--- a/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
++++ b/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
+@@ -1,5 +1,9 @@
+ package com.example.carrothud
+ 
++import android.Manifest
++import android.content.Context
++import android.content.pm.PackageManager
++import android.graphics.Bitmap
+ import android.graphics.BitmapFactory
+ import android.graphics.Canvas
+ import android.graphics.Color
+@@ -9,8 +13,13 @@ import android.graphics.Path
+ import android.graphics.PointF
+ import android.graphics.RectF
+ import android.graphics.Shader
++import android.location.Location
++import android.location.LocationListener
++import android.location.LocationManager
+ import android.os.SystemClock
++import android.os.Looper
+ import android.util.Log
++import android.util.LruCache
+ import androidx.car.app.AppManager
+ import androidx.car.app.CarContext
+ import androidx.car.app.Screen
+@@ -30,10 +39,15 @@ import java.net.Socket
+ import java.nio.ByteBuffer
+ import java.nio.ByteOrder
+ import java.util.Collections
++import java.util.concurrent.ConcurrentHashMap
+ import java.util.concurrent.TimeUnit
++import kotlin.math.PI
++import kotlin.math.floor
++import kotlin.math.ln
+ import kotlin.math.max
+ import kotlin.math.min
+-import kotlin.math.sin
++import kotlin.math.pow
++import kotlin.math.tan
+ 
+ class CarrotMainScreen(
+     carContext: CarContext
+@@ -53,6 +67,7 @@ class CarrotMainScreen(
+         val leadRelSpeed: Float = 0f,
+         val leftBlinker: Boolean = false,
+         val rightBlinker: Boolean = false,
++        val steeringAngle: Float = 0f,
+         val pathX: FloatArray = floatArrayOf(),
+         val pathY: FloatArray = floatArrayOf(),
+         val laneLines: List<Pair<FloatArray, FloatArray>> = emptyList(),
+@@ -65,6 +80,8 @@ class CarrotMainScreen(
+     )
+ 
+     private var surfaceContainer: SurfaceContainer? = null
++    private var carPresentation: CarSurfacePresentation? = null
++    private var navigationFailure: String? = null
+ 
+     @Volatile
+     private var rendering = false
+@@ -84,6 +101,18 @@ class CarrotMainScreen(
+         .build()
+ 
+     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val roadMotion = RoadMotion()
++    private val vehicleMeshes = VehicleMeshRenderer()
++    private val mapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
++    private val tileCache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
++        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
++    }
++    private val requestedTiles = ConcurrentHashMap.newKeySet<String>()
++    private val locationManager = carContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
++    @Volatile private var mapLocation: Location? = null
++    private val locationListener = LocationListener { location ->
++        if (location.accuracy <= 100f || mapLocation == null) mapLocation = location
++    }
+     private val egoVehicleBitmap =
+         BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_de_3d)
+     private val leadVehicleBitmap =
+@@ -101,15 +130,52 @@ class CarrotMainScreen(
+                 e
+             )
+         }
++        startLocationUpdates()
++    }
++
++    private fun startLocationUpdates() {
++        if (carContext.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
++            carContext.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
++        ) return
++
++        runCatching {
++            locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)?.let { mapLocation = it }
++            locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)?.let {
++                if (mapLocation == null || it.time > (mapLocation?.time ?: 0L)) mapLocation = it
++            }
++            locationManager.requestLocationUpdates(
++                LocationManager.GPS_PROVIDER,
++                500L,
++                1f,
++                locationListener,
++                Looper.getMainLooper()
++            )
++        }.onFailure { Log.w(TAG, "Location updates unavailable", it) }
+     }
+ 
+     override fun onSurfaceAvailable(
+         surfaceContainer: SurfaceContainer
+     ) {
++        renderJob?.cancel()
++        carPresentation?.close()
++        carPresentation = null
+         this.surfaceContainer = surfaceContainer
++        roadMotion.pause()
+         rendering = true
+ 
+-        startRenderer()
++        val useKakao = carContext.getSharedPreferences("navigation",Context.MODE_PRIVATE).getBoolean("enabled",false)
++        navigationFailure = null
++        if(useKakao) {
++            val presentation=CarSurfacePresentation(carContext,::drawHudPane)
++            carPresentation=presentation
++            runCatching { presentation.attach(surfaceContainer) }.onFailure {
++                Log.e(TAG,"Kakao AA output unavailable",it)
++                presentation.close()
++                carPresentation=null
++                navigationFailure="카카오 AA 출력 실패 · 휴대폰에서 설정 확인"
++                startRenderer()
++            }
++        } else startRenderer()
+         startConnection()
+     }
+ 
+@@ -117,6 +183,8 @@ class CarrotMainScreen(
+         surfaceContainer: SurfaceContainer
+     ) {
+         rendering = false
++        carPresentation?.close()
++        carPresentation=null
+ 
+         renderJob?.cancel()
+         connectJob?.cancel()
+@@ -327,7 +395,7 @@ class CarrotMainScreen(
+         val cluster = c.f32()
+         val cruise = c.f32()
+ 
+-        c.f32() // steeringAngleDeg
++        val steeringAngle = c.f32()
+         c.bool() // brakeHoldActive
+         c.i16() // softHoldActive
+         c.i16() // carrotCruise
+@@ -355,6 +423,7 @@ class CarrotMainScreen(
+             cruiseKph = cruiseKph,
+             leftBlinker = leftBlinker,
+             rightBlinker = rightBlinker,
++            steeringAngle = if (steeringAngle.isFinite()) steeringAngle else 0f,
+             connected = true
+         )
+     }
+@@ -488,10 +557,8 @@ class CarrotMainScreen(
+ 
+             val s = state
+ 
+-            // Experimental Android Auto split layout. The left pane is reserved for the
+-            // Kakao embedded navigation view; the right pane remains the live Carrot HUD.
+             val splitX = width * 0.5f
+-            drawKakaoPanePlaceholder(canvas, splitX, height)
++            drawMapPane(canvas, splitX, height)
+ 
+             canvas.save()
+             canvas.clipRect(splitX, 0f, width, height)
+@@ -500,7 +567,7 @@ class CarrotMainScreen(
+ 
+             drawRoadBackground(canvas, hudWidth, height)
+ 
+-            drawRoadMotion(canvas, hudWidth, height, s.speedKph)
++            drawRoadMotion(canvas, hudWidth, height, if (s.connected) s.speedKph else 0f)
+ 
+             drawRoad(
+                 canvas,
+@@ -543,43 +610,126 @@ class CarrotMainScreen(
+         }
+     }
+ 
+-    /** Placeholder replaced by the Kakao KNNaviView once the native app key is configured. */
+-    private fun drawKakaoPanePlaceholder(canvas: Canvas, width: Float, height: Float) {
++    /** Renders OpenStreetMap raster tiles directly into Android Auto's navigation Surface. */
++    private fun drawMapPane(canvas: Canvas, width: Float, height: Float) {
++        navigationFailure?.let { message ->
++            paint.color=Color.WHITE
++            paint.style=Paint.Style.FILL
++            canvas.drawRect(0f,0f,width,height,paint)
++            paint.color=Color.DKGRAY
++            paint.textSize=height*.04f
++            paint.textAlign=Paint.Align.CENTER
++            canvas.drawText(message,width/2,height/2,paint)
++            paint.textAlign=Paint.Align.LEFT
++            return
++        }
+         paint.style = Paint.Style.FILL
+-        paint.color = Color.rgb(235, 237, 234)
++        paint.color = Color.rgb(226, 229, 225)
+         canvas.drawRect(0f, 0f, width, height, paint)
+ 
+-        paint.color = Color.rgb(206, 210, 205)
+-        for (i in 0..7) {
+-            val y = height * (i / 7f)
+-            canvas.drawRect(0f, y, width, y + max(1f, height * 0.003f), paint)
+-        }
+-        for (i in 0..5) {
+-            val x = width * (i / 5f)
+-            canvas.drawRect(x, 0f, x + max(1f, width * 0.004f), height, paint)
++        val location = mapLocation
++        val lat = location?.latitude ?: 37.5665
++        val lon = location?.longitude ?: 126.9780
++        val zoom = 16
++        val tileSize = 256.0
++        val worldSize = tileSize * 2.0.pow(zoom)
++        val centerX = (lon + 180.0) / 360.0 * worldSize
++        val clippedLat = lat.coerceIn(-85.05112878, 85.05112878)
++        val latRad = clippedLat * PI / 180.0
++        val centerY = (1.0 - ln(tan(latRad) + 1.0 / kotlin.math.cos(latRad)) / PI) / 2.0 * worldSize
++        val carScreenX = width * 0.5f
++        val carScreenY = height * 0.64f
++
++        canvas.save()
++        canvas.clipRect(0f, 0f, width, height)
++        for (tx in floor((centerX - width) / tileSize).toInt()..floor((centerX + width) / tileSize).toInt()) {
++            for (ty in floor((centerY - height) / tileSize).toInt()..floor((centerY + height) / tileSize).toInt()) {
++                val tileCount = 1 shl zoom
++                if (ty !in 0 until tileCount) continue
++                val wrappedX = ((tx % tileCount) + tileCount) % tileCount
++                val key = "$zoom/$wrappedX/$ty"
++                val left = (carScreenX + tx * tileSize - centerX).toFloat()
++                val top = (carScreenY + ty * tileSize - centerY).toFloat()
++                val bitmap = synchronized(tileCache) { tileCache.get(key) }
++                if (bitmap != null) {
++                    canvas.drawBitmap(bitmap, null, RectF(left, top, left + 256f, top + 256f), mapPaint)
++                } else {
++                    requestTile(zoom, wrappedX, ty, key)
++                }
++            }
+         }
++        canvas.restore()
+ 
++        // Vehicle position and live GPS heading.
+         paint.style = Paint.Style.STROKE
+         paint.strokeCap = Paint.Cap.ROUND
+-        paint.strokeWidth = max(6f, width * 0.018f)
+-        paint.color = Color.rgb(255, 214, 0)
+-        val route = Path().apply {
+-            moveTo(width * 0.12f, height * 0.82f)
+-            cubicTo(width * 0.28f, height * 0.64f, width * 0.34f, height * 0.38f, width * 0.53f, height * 0.47f)
+-            cubicTo(width * 0.69f, height * 0.54f, width * 0.72f, height * 0.22f, width * 0.88f, height * 0.14f)
+-        }
+-        canvas.drawPath(route, paint)
++        paint.strokeWidth = max(4f, width * 0.010f)
++        paint.color = Color.WHITE
++        canvas.drawCircle(carScreenX, carScreenY, max(14f, width * 0.030f), paint)
+ 
+         paint.style = Paint.Style.FILL
++        paint.color = Color.rgb(24, 112, 230)
++        canvas.save()
++        canvas.rotate(location?.bearing ?: 0f, carScreenX, carScreenY)
++        val marker = Path().apply {
++            moveTo(carScreenX, carScreenY - max(18f, width * 0.040f))
++            lineTo(carScreenX - max(11f, width * 0.024f), carScreenY + max(14f, width * 0.030f))
++            lineTo(carScreenX, carScreenY + max(7f, width * 0.015f))
++            lineTo(carScreenX + max(11f, width * 0.024f), carScreenY + max(14f, width * 0.030f))
++            close()
++        }
++        canvas.drawPath(marker, paint)
++        canvas.restore()
++
++        paint.color = Color.argb(205, 22, 25, 28)
++        canvas.drawRoundRect(
++            RectF(width * 0.04f, height * 0.04f, width * 0.54f, height * 0.14f),
++            14f, 14f, paint
++        )
+         paint.textAlign = Paint.Align.CENTER
+         paint.isFakeBoldText = true
+-        paint.color = Color.rgb(35, 38, 40)
+-        paint.textSize = max(24f, height * 0.055f)
+-        canvas.drawText("KAKAO NAVI", width * 0.5f, height * 0.12f, paint)
++        paint.color = Color.WHITE
++        paint.textSize = max(15f, height * 0.035f)
++        canvas.drawText(if (location == null) "GPS WAIT" else "OSM · GPS", width * 0.29f, height * 0.105f, paint)
+         paint.isFakeBoldText = false
+-        paint.color = Color.rgb(95, 99, 102)
+-        paint.textSize = max(16f, height * 0.030f)
+-        canvas.drawText("APP KEY REQUIRED", width * 0.5f, height * 0.18f, paint)
++        paint.textAlign = Paint.Align.LEFT
++
++        paint.color = Color.argb(190, 255, 255, 255)
++        paint.textSize = max(10f, height * 0.022f)
++        canvas.drawText("© OpenStreetMap contributors", width * 0.03f, height * 0.97f, paint)
++    }
++
++    private fun requestTile(zoom: Int, x: Int, y: Int, key: String) {
++        if (!requestedTiles.add(key)) return
++        val request = Request.Builder()
++            .url("https://tile.openstreetmap.org/$zoom/$x/$y.png")
++            .header("User-Agent", "CarrotHUD/1.1 personal Android Auto prototype")
++            .build()
++        httpClient.newCall(request).enqueue(object : Callback {
++            override fun onFailure(call: Call, e: java.io.IOException) {
++                requestedTiles.remove(key)
++            }
++
++            override fun onResponse(call: Call, response: Response) {
++                response.use {
++                    if (!it.isSuccessful) return
++                    val bytes = it.body?.bytes() ?: return
++                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
++                    synchronized(tileCache) { tileCache.put(key, bitmap) }
++                }
++                requestedTiles.remove(key)
++            }
++        })
++    }
++
++    private fun drawHudPane(canvas: Canvas,width: Float,height: Float) {
++        val snapshot=state
++        drawRoadBackground(canvas,width,height)
++        drawRoadMotion(canvas,width,height,if(snapshot.connected) snapshot.speedKph else 0f)
++        drawRoad(canvas,width,height,snapshot)
++        drawLead(canvas,width,height,snapshot)
++        drawSpeed(canvas,width,height,snapshot)
++        drawStatus(canvas,width,height,snapshot)
+     }
+ 
+     /** All geometry uses normalized screen coordinates, so wide OEM surfaces never stretch a bitmap. */
+@@ -587,30 +737,16 @@ class CarrotMainScreen(
+         paint.style = Paint.Style.FILL
+         paint.shader = LinearGradient(
+             0f, 0f, 0f, height,
+-            Color.rgb(244, 245, 243), Color.rgb(205, 207, 203),
++            Color.rgb(250, 250, 250), Color.rgb(236, 238, 240),
+             Shader.TileMode.CLAMP
+         )
+         canvas.drawRect(0f, 0f, width, height, paint)
+         paint.shader = null
+ 
+-        // Soft distant landscape, drawn in screen-relative coordinates.
+-        paint.color = Color.rgb(218, 221, 216)
+-        canvas.drawPath(Path().apply {
+-            moveTo(0f, height * 0.33f)
+-            lineTo(width * 0.18f, height * 0.20f)
+-            lineTo(width * 0.34f, height * 0.31f)
+-            lineTo(width * 0.51f, height * 0.17f)
+-            lineTo(width * 0.72f, height * 0.32f)
+-            lineTo(width, height * 0.22f)
+-            lineTo(width, height * 0.43f)
+-            lineTo(0f, height * 0.43f)
+-            close()
+-        }, paint)
+-
+         // Tesla-like matte road plane. No bitmap scaling means no horizontal distortion.
+         paint.shader = LinearGradient(
+             0f, height * 0.25f, 0f, height,
+-            Color.rgb(226, 227, 224), Color.rgb(183, 187, 185),
++            Color.rgb(245, 246, 247), Color.rgb(224, 227, 230),
+             Shader.TileMode.CLAMP
+         )
+         canvas.drawPath(Path().apply {
+@@ -675,9 +811,7 @@ class CarrotMainScreen(
+ 
+     /** Moving perspective markers provide continuous forward-motion depth at the live vehicle speed. */
+     private fun drawRoadMotion(canvas: Canvas, width: Float, height: Float, speedKph: Float) {
+-        val now = SystemClock.uptimeMillis() / 1000f
+-        val speedFactor = (speedKph / 90f).coerceIn(0.08f, 1.8f)
+-        val phase = (now * speedFactor * 0.72f) % 1f
++        val phase = roadMotion.advance(SystemClock.uptimeMillis(), speedKph, true)
+ 
+         paint.style = Paint.Style.STROKE
+         paint.strokeCap = Paint.Cap.ROUND
+@@ -830,19 +964,14 @@ class CarrotMainScreen(
+         s: HudState
+     ) {
+         val cx = width * 0.5f
+-        val now = SystemClock.uptimeMillis()
+-        val roadPulse = (s.speedKph / 100f).coerceIn(0f, 1.2f)
+-        val bob = sin(now / 150.0).toFloat() * height * 0.0025f * roadPulse
+-        val sway = sin(now / 620.0).toFloat() * 0.65f * roadPulse
+-        val cy = height * 0.75f + bob
++        val cy = height * 0.75f
+         val blinkOn = (SystemClock.uptimeMillis() / 450L) % 2L == 0L
+         canvas.save()
+-        canvas.rotate(sway, cx, cy)
+         drawTopDownCar(
+             canvas,
+             cx,
+             cy,
+-            width * 0.115f,
++            width * 0.25f,
+             height * 0.31f,
+             true,
+             s.enabled,
+@@ -862,6 +991,24 @@ class CarrotMainScreen(
+         enabled: Boolean = false,
+         leftBlinker: Boolean = false,
+         rightBlinker: Boolean = false
++    ) {
++        val yaw = if (ego && state.connected && state.speedKph > .5f)
++            (state.steeringAngle / 18f).coerceIn(-8f,8f) else 0f
++        vehicleMeshes.draw(canvas, RectF(cx-carW/2,cy-carH/2,cx+carW/2,cy+carH/2),
++            ego,yaw,leftBlinker,rightBlinker)
++    }
++
++    // Retained only as a legacy reference; the live renderer never calls this sprite path.
++    private fun drawLegacySpriteCar(
++        canvas: Canvas,
++        cx: Float,
++        cy: Float,
++        carW: Float,
++        carH: Float,
++        ego: Boolean,
++        enabled: Boolean = false,
++        leftBlinker: Boolean = false,
++        rightBlinker: Boolean = false
+     ) {
+         val vehicleBitmap = if (ego) egoVehicleBitmap else leadVehicleBitmap
+         if (vehicleBitmap != null) {
+@@ -959,16 +1106,10 @@ class CarrotMainScreen(
+         val carH = height * (0.19f - normalized * 0.11f)
+         // Preserve the previous on-screen width even though the new 3D sprite is wider.
+         val carW = carH * 0.98f
+-        val leadAspect = leadVehicleBitmap.width.toFloat() / leadVehicleBitmap.height.toFloat()
+-        val leadDrawnW = min(carW, carH * leadAspect)
+-        val leadDrawnH = leadDrawnW / leadAspect
+-        val leadBob = sin(SystemClock.uptimeMillis() / 210.0).toFloat() * height * 0.0014f
+-        val egoAspect = egoVehicleBitmap.width.toFloat() / egoVehicleBitmap.height.toFloat()
+-        val egoDrawnW = min(width * 0.115f, height * 0.31f * egoAspect)
+-        val egoDrawnH = egoDrawnW / egoAspect
+-        val egoTop = height * 0.75f - egoDrawnH / 2f
+-        val maximumLeadCenterY = egoTop - height * 0.025f - leadDrawnH / 2f
+-        val leadCenterY = min(point.y + leadBob, maximumLeadCenterY)
++        // Full mesh fit bounds are conservative even when yaw changes its projected aspect.
++        val egoTop = height * 0.75f - height * 0.31f / 2f
++        val maximumLeadCenterY = egoTop - height * 0.025f - carH / 2f
++        val leadCenterY = min(point.y, maximumLeadCenterY)
+         drawTopDownCar(canvas, point.x, leadCenterY, carW, carH, false)
+     }
+ 
+@@ -1057,9 +1198,9 @@ class CarrotMainScreen(
+ 
+         canvas.drawText(
+             if (s.connected)
+-                "GPS  ·  ONLINE"
++                "차량 연결됨"
+             else
+-                "SEARCHING COMMA 4",
++                "차량 연결 대기",
+             width * 0.5f,
+             height * 0.955f,
+             paint
+diff --git a/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
+new file mode 100644
+index 0000000..871c6d3
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/KakaoNavigationPane.kt
+@@ -0,0 +1,188 @@
++package com.example.carrothud
++
++import android.Manifest
++import android.app.Application
++import android.content.Context
++import android.content.pm.PackageManager
++import android.graphics.Color
++import android.location.LocationManager
++import android.os.Handler
++import android.os.Looper
++import android.widget.FrameLayout
++import android.widget.TextView
++import com.kakaomobility.knsdk.KNSDK
++import com.kakaomobility.knsdk.KNRoutePriority
++import com.kakaomobility.knsdk.common.objects.KNPOI
++import com.kakaomobility.knsdk.ui.view.KNNaviView
++import java.lang.reflect.Proxy
++
++/** Official embedded navigation UI. An authentication failure is never replaced by OSM. */
++class KakaoNavigationPane(context: Context) : FrameLayout(context) {
++    private val main=Handler(Looper.getMainLooper())
++    private val prefs=context.getSharedPreferences("navigation",Context.MODE_PRIVATE)
++    private val status=TextView(context).apply {
++        text="카카오 내비 연결 중…"; textSize=18f; setTextColor(Color.DKGRAY)
++        gravity=android.view.Gravity.CENTER; setBackgroundColor(Color.WHITE)
++    }
++    private var closed=false
++    private var view: KNNaviView?=null
++    private val delegates=mutableListOf<Any>()
++    private val timeout=Runnable { if(view==null && !closed) status.text="카카오 응답 대기 중\n네트워크와 앱 키 등록을 확인하세요" }
++
++    init {
++        addView(status,LayoutParams(-1,-1))
++        val key=prefs.getString("native_key","").orEmpty()
++        if(key.isBlank()) status.text="휴대폰 앱에서 카카오 내비 키를 설정하세요"
++        else if(context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)!=PackageManager.PERMISSION_GRANTED)
++            status.text="휴대폰 앱에 정확한 위치 권한을 허용하세요"
++        else {
++            main.postDelayed(timeout,20000)
++            try {
++                install(context.applicationContext as Application)
++                initialize(key) { success ->
++                    main.post {
++                        if(!closed) {
++                            if(!success) fail("카카오 인증·초기화 실패\n패키지명과 현재 APK 키 해시를 확인하세요")
++                            else runCatching { startNavigation() }.onFailure { fail("카카오 화면 초기화 실패\n휴대폰에서 설정을 확인한 뒤 다시 연결하세요") }
++                        }
++                    }
++                }
++            } catch (_: Exception) { fail("카카오 SDK 초기화 실패") }
++        }
++    }
++
++    private fun fail(message: String) {
++        main.removeCallbacks(timeout)
++        status.text=message
++        status.visibility=VISIBLE
++        status.bringToFront()
++    }
++
++    private fun startNavigation() {
++        val guidance=checkNotNull(KNSDK.sharedGuidance())
++        val nav=KNNaviView(context)
++        view=nav
++        addView(nav,0,LayoutParams(-1,-1))
++        // The SDK view exposes callbacks but does not implement the delegate interfaces.
++        // Bind each public delegate's matching callback, validating every method up front.
++        for(name in listOf("setGuideStateDelegate","setLocationGuideDelegate","setRouteGuideDelegate",
++            "setSafetyGuideDelegate","setVoiceGuideDelegate","setCitsGuideDelegate")) {
++            val setter=guidance.javaClass.methods.single { it.name==name && it.parameterCount==1 }
++            val type=setter.parameterTypes[0]
++            val methods=type.methods.associateWith { method ->
++                nav.javaClass.methods.firstOrNull { it.name==method.name && it.parameterTypes.contentEquals(method.parameterTypes) }
++                    // SDK 1.12.7 adds route-change details to the delegate; its UI still
++                    // takes the documented guidance-only callback.
++                    ?: nav.javaClass.methods.firstOrNull { method.name=="guidanceRouteChanged" &&
++                        it.name==method.name && it.parameterCount==1 &&
++                        it.parameterTypes[0]==method.parameterTypes[0] }
++                    ?: nav.javaClass.methods.firstOrNull { method.name=="guidanceGuideEnded" && it.name==method.name && it.parameterCount==2 }
++                    ?: error("Unsupported Kakao callback: ${method.name}")
++            }
++            val proxy=Proxy.newProxyInstance(type.classLoader,arrayOf(type)) { instance,method,args ->
++                when(method.name) {
++                    "toString" -> "CarrotNavigationDelegate"
++                    "hashCode" -> System.identityHashCode(instance)
++                    "equals" -> instance === args?.firstOrNull()
++                    else -> {
++                        val target=checkNotNull(methods[method])
++                        val values=args ?: emptyArray()
++                        if(target.parameterCount<=values.size) target.invoke(nav,*values.take(target.parameterCount).toTypedArray())
++                        else target.invoke(nav,*values,false)
++                    }
++                }
++            }
++            delegates.add(proxy)
++            setter.invoke(guidance,proxy)
++        }
++        KNSDK.handleCarInterfaceConnected()
++        KNSDK.handleWillEnterForeground()
++        KNSDK.handleDidBecomeActive()
++        val latitude=prefs.getString("goal_lat","")?.toDoubleOrNull()
++        val longitude=prefs.getString("goal_lon","")?.toDoubleOrNull()
++        val priority=KNRoutePriority.KNRoutePriority_Recommand
++        if(latitude==null || longitude==null) {
++            nav.initWithGuidance(guidance,null,priority,0)
++            status.visibility=GONE
++            main.removeCallbacks(timeout)
++            return
++        }
++        val manager=context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
++        @Suppress("MissingPermission")
++        val location=manager.getProviders(true).mapNotNull { provider ->
++            runCatching { manager.getLastKnownLocation(provider) }.getOrNull()
++        }.filter { android.os.SystemClock.elapsedRealtimeNanos()-it.elapsedRealtimeNanos < 120_000_000_000L }
++            .maxByOrNull { it.elapsedRealtimeNanos }
++        if(location==null) { fail("현재 위치 수신 대기\nGPS 수신 후 AA를 다시 연결하세요"); return }
++        val start=KNSDK.convertWGS84ToKATEC(location.longitude,location.latitude)
++        val goal=KNSDK.convertWGS84ToKATEC(longitude,latitude)
++        val startPoi=KNPOI("현재 위치",start.x.toInt(),start.y.toInt())
++        val goalPoi=KNPOI(prefs.getString("goal_name","목적지").orEmpty(),goal.x.toInt(),goal.y.toInt())
++        KNSDK.makeTripWithStart(startPoi,goalPoi,null,null) { error,trip ->
++            main.post {
++                if(!closed) {
++                    if(error!=null || trip==null) fail("카카오 경로 요청 실패\n목적지와 네트워크를 확인하세요")
++                    else trip.routeWithPriority(priority,0) { routeError,_ ->
++                        main.post {
++                            if(!closed) {
++                                if(routeError!=null) fail("카카오 경로 탐색 실패")
++                                else {
++                                    nav.initWithGuidance(guidance,trip,priority,0)
++                                    status.visibility=GONE
++                                    main.removeCallbacks(timeout)
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    fun close() {
++        closed=true
++        main.removeCallbacksAndMessages(null)
++        if(view!=null) {
++            KNSDK.sharedGuidance()?.stop()
++            KNSDK.sharedGuidance()?.apply {
++                guideStateDelegate=null; locationGuideDelegate=null; routeGuideDelegate=null
++                safetyGuideDelegate=null; voiceGuideDelegate=null; citsGuideDelegate=null
++            }
++            KNSDK.handleCarInterfaceDisconnected()
++        }
++        delegates.clear()
++        removeAllViews()
++        view=null
++    }
++
++    companion object {
++        private var installed=false
++        private var readyKey: String?=null
++        private var loadingKey: String?=null
++        private val completions=mutableListOf<(Boolean)->Unit>()
++        private fun initialize(key: String,completion: (Boolean)->Unit) {
++            if(readyKey==key) { completion(true); return }
++            if(readyKey!=null || (loadingKey!=null && loadingKey!=key)) {
++                completion(false); return // A changed key requires a fresh process.
++            }
++            completions.add(completion)
++            if(loadingKey!=null) return
++            loadingKey=key
++            KNSDK.initializeWithAppKey(key,"1.2.0-preview") { error ->
++                Handler(Looper.getMainLooper()).post {
++                    if(error==null) readyKey=key
++                    loadingKey=null
++                    val waiting=completions.toList()
++                    completions.clear()
++                    waiting.forEach { it(error==null) }
++                }
++            }
++        }
++        @Synchronized private fun install(application: Application) {
++            if(!installed) {
++                KNSDK.install(application,"${application.filesDir}/kakao-navigation")
++                installed=true
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/example/carrothud/MainActivity.kt b/app/src/main/java/com/example/carrothud/MainActivity.kt
+index 80c386b..35ee9b7 100644
+--- a/app/src/main/java/com/example/carrothud/MainActivity.kt
++++ b/app/src/main/java/com/example/carrothud/MainActivity.kt
+@@ -1,6 +1,11 @@
+ package com.example.carrothud
+ 
++import android.Manifest
+ import android.app.Activity
++import android.content.Intent
++import android.widget.LinearLayout
++import android.widget.Button
++import android.content.pm.PackageManager
+ import android.os.Bundle
+ import android.view.WindowManager
+ import android.webkit.WebSettings
+@@ -22,8 +27,27 @@ class MainActivity : Activity() {
+ 
+         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+ 
++        if (android.os.Build.VERSION.SDK_INT >= 23 &&
++            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
++        ) {
++            requestPermissions(
++                arrayOf(
++                    Manifest.permission.ACCESS_FINE_LOCATION,
++                    Manifest.permission.ACCESS_COARSE_LOCATION
++                ),
++                1001
++            )
++        }
++
+         webView = WebView(this)
+-        setContentView(webView)
++        setContentView(LinearLayout(this).apply {
++            orientation = LinearLayout.VERTICAL
++            addView(Button(this@MainActivity).apply {
++                text = "카카오 내비 설정"
++                setOnClickListener { startActivity(Intent(this@MainActivity,NavigationSettingsActivity::class.java)) }
++            })
++            addView(webView,LinearLayout.LayoutParams(-1,0,1f))
++        })
+ 
+         webView.settings.apply {
+             javaScriptEnabled = true
+diff --git a/app/src/main/java/com/example/carrothud/NavigationSettingsActivity.kt b/app/src/main/java/com/example/carrothud/NavigationSettingsActivity.kt
+new file mode 100644
+index 0000000..81489fc
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/NavigationSettingsActivity.kt
+@@ -0,0 +1,74 @@
++package com.example.carrothud
++
++import android.app.Activity
++import android.os.Bundle
++import android.content.Context
++import android.content.pm.PackageManager
++import android.text.InputType
++import android.util.Base64
++import android.widget.*
++import java.security.MessageDigest
++
++/** Phone-only setup. Never request text input from the driver on the AA surface. */
++class NavigationSettingsActivity : Activity() {
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        val prefs = getSharedPreferences("navigation",Context.MODE_PRIVATE)
++        val layout = LinearLayout(this).apply {
++            orientation=LinearLayout.VERTICAL
++            setPadding(32,32,32,32)
++        }
++        setContentView(ScrollView(this).apply { addView(layout) })
++        fun label(value: String) { layout.addView(TextView(this).apply { text=value; textSize=17f; setPadding(0,16,0,8) }) }
++        fun field(hintText: String, stored: String, secret: Boolean=false): EditText {
++            return EditText(this).apply {
++                hint=hintText; setSingleLine(true)
++                inputType= if(secret) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
++                    else InputType.TYPE_CLASS_TEXT
++                setText(prefs.getString(stored,""))
++                layout.addView(this)
++            }
++        }
++        label("카카오 내비 · 실험 버전 설정")
++        label("정차 후 설정하세요. AA에서 동작 여부는 실차 검증이 필요합니다.")
++        val key=field("카카오 네이티브 앱 키","native_key",true)
++        label("등록할 패키지: $packageName")
++        @Suppress("DEPRECATION")
++        val signatures=packageManager.getPackageInfo(packageName,PackageManager.GET_SIGNATURES).signatures
++        val hash=signatures?.firstOrNull()?.let {
++            Base64.encodeToString(MessageDigest.getInstance("SHA-1").digest(it.toByteArray()),Base64.NO_WRAP)
++        } ?: "서명 확인 실패"
++        layout.addView(TextView(this).apply { text="현재 APK 키 해시\n$hash"; setTextIsSelectable(true); textSize=15f })
++        label("아래 목적지는 시험용 좌표 입력입니다. 미입력 시 안전운행 지도만 표시합니다.")
++        val name=field("목적지 이름","goal_name")
++        val lat=field("목적지 위도 (예: 37.5665)","goal_lat")
++        val lon=field("목적지 경도 (예: 126.9780)","goal_lon")
++        val enabled=Switch(this).apply {
++            text="AA 카카오 SDK 분할 화면 사용 (시험용)"
++            isChecked=prefs.getBoolean("enabled",false)
++            layout.addView(this)
++        }
++        layout.addView(Button(this).apply {
++            text="저장"
++            setOnClickListener {
++                val latitude=lat.text.toString().trim()
++                val longitude=lon.text.toString().trim()
++                if(enabled.isChecked && !key.text.toString().trim().matches(Regex("[0-9a-fA-F]{32}"))) {
++                    key.error="네이티브 앱 키를 확인하세요"; return@setOnClickListener
++                }
++                if(latitude.isNotEmpty() || longitude.isNotEmpty()) {
++                    val a=latitude.toDoubleOrNull(); val b=longitude.toDoubleOrNull()
++                    if(a==null || b==null || a !in -90.0..90.0 || b !in -180.0..180.0) {
++                        lat.error="위도·경도를 모두 확인하세요"; return@setOnClickListener
++                    }
++                }
++                prefs.edit().putString("native_key",key.text.toString().trim())
++                    .putString("goal_name",name.text.toString().trim())
++                    .putString("goal_lat",latitude).putString("goal_lon",longitude)
++                    .putBoolean("enabled",enabled.isChecked).apply()
++                Toast.makeText(this@NavigationSettingsActivity,"저장했습니다. AA를 다시 연결하세요.",Toast.LENGTH_LONG).show()
++                finish()
++            }
++        })
++    }
++}
+diff --git a/app/src/main/java/com/example/carrothud/RoadMotion.java b/app/src/main/java/com/example/carrothud/RoadMotion.java
+new file mode 100644
+index 0000000..b521cc4
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/RoadMotion.java
+@@ -0,0 +1,21 @@
++package com.example.carrothud;
++
++/** Distance-driven road markings, independent of the Android frame scheduler. */
++public final class RoadMotion {
++    private long previousMillis = -1;
++    private float phase = 0f;
++
++    public float advance(long nowMillis, float speedKph, boolean connected) {
++        float seconds = previousMillis < 0 ? 0f
++                : Math.max(0f, Math.min(0.1f, (nowMillis - previousMillis) / 1000f));
++        previousMillis = nowMillis;
++        float speed = connected && Float.isFinite(speedKph) && speedKph >= 0.5f
++                ? speedKph : 0f;
++        phase = (phase + seconds * speed / 3.6f / 35f) % 1f;
++        return phase;
++    }
++
++    public void pause() {
++        previousMillis = -1;
++    }
++}
+diff --git a/app/src/main/java/com/example/carrothud/VehicleMesh.java b/app/src/main/java/com/example/carrothud/VehicleMesh.java
+new file mode 100644
+index 0000000..e59369a
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/VehicleMesh.java
+@@ -0,0 +1,133 @@
++package com.example.carrothud;
++
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++
++/** Actual XYZ mesh, not a pre-rendered image. Procedural DE-style crossover prototype.
++ * Not an OEM CAD model. Coordinates are metres: X right, Y up, Z forward.
++ */
++public final class VehicleMesh {
++    public static final int BODY = 0, GLASS = 1, TRIM = 2, WHEEL = 3,
++            ALLOY = 4, TAIL = 5, LEFT_SIGNAL = 6, RIGHT_SIGNAL = 7;
++    public static final class Face {
++        public final double[][] vertices;
++        public final int material;
++        Face(int material, double[]... vertices) {
++            this.material = material;
++            this.vertices = vertices;
++        }
++    }
++    public static final class ProjectedFace {
++        public final double[] x, y;
++        public final double depth, light;
++        public final int material;
++        ProjectedFace(double[] x, double[] y, double depth, double light, int material) {
++            this.x = x; this.y = y; this.depth = depth; this.light = light;
++            this.material = material;
++        }
++    }
++    private final List<Face> faces = new ArrayList<>();
++
++    public VehicleMesh(boolean crossover) {
++        double length = crossover ? 4.375 : 4.7;
++        double rear = -length / 2, front = length / 2;
++        // Rounded shoulder sections, black lower cladding, white body panels.
++        hull(new double[]{rear, rear+.25, front-.35, front},
++                new double[]{.77,.90,.88,.73}, .38,.58, TRIM);
++        hull(new double[]{rear, rear+.25, front-.35, front},
++                new double[]{.77,.90,.88,.73}, .58,1.08, BODY);
++        double roof = crossover ? 1.57 : 1.39;
++        double[] a = {-0.77,1.08,rear+.20}, b = {.77,1.08,rear+.20};
++        double[] c = {-.65,roof,rear+.85}, d = {.65,roof,rear+.85};
++        double[] e = {-.65,roof,.48}, f = {.65,roof,.48};
++        double[] g = {-.78,1.08,1.25}, h = {.78,1.08,1.25};
++        face(GLASS,a,b,d,c); face(BODY,c,d,f,e); face(GLASS,e,f,h,g);
++        face(GLASS,a,c,e,g); face(GLASS,b,h,f,d);
++        // Narrow pillars and roof rails, distinct rear spoiler on the crossover.
++        box(-.70,.70,roof,roof+.045,rear+.81,.53,BODY);
++        box(-.75,.75,roof-.06,roof+.025,rear+.73,rear+.90,TRIM);
++        for (double side : new double[]{-1,1}) {
++            double x = side*.735;
++            box(x-.035,x+.035,1.1,roof-.02,-.45,-.34,TRIM);
++            box(side*.91-.09,side*.91+.09,1.03,1.15,.52,.78,BODY);
++            for (double z : new double[]{rear+.72,front-.76}) wheel(side*.88,.35,z);
++        }
++        // Horizontal DE-style tail lamps, signals on the rear bumper (no floating arrows).
++        box(-.76,-.34,.91,1.03,rear-.025,rear+.02,TAIL);
++        box(.34,.76,.91,1.03,rear-.025,rear+.02,TAIL);
++        box(-.74,-.49,.54,.63,rear-.03,rear+.01,LEFT_SIGNAL);
++        box(.49,.74,.54,.63,rear-.03,rear+.01,RIGHT_SIGNAL);
++        box(-.25,.25,.66,.78,rear-.03,rear,TRIM);
++        box(-.62,.62,.36,.43,rear-.04,rear+.05,ALLOY);
++    }
++    private void face(int material,double[]... vertices) { faces.add(new Face(material,vertices)); }
++    private void box(double x0,double x1,double y0,double y1,double z0,double z1,int m) {
++        double[] a={x0,y0,z0},b={x1,y0,z0},c={x1,y1,z0},d={x0,y1,z0};
++        double[] e={x0,y0,z1},f={x1,y0,z1},g={x1,y1,z1},h={x0,y1,z1};
++        face(m,a,b,c,d); face(m,e,h,g,f); face(m,a,d,h,e);
++        face(m,b,f,g,c); face(m,d,c,g,h); face(m,a,e,f,b);
++    }
++    private void hull(double[] zs,double[] widths,double low,double high,int material) {
++        double[][] prev=null;
++        for(int k=0;k<zs.length;k++) {
++            double w=widths[k], z=zs[k];
++            double[][] ring={{-w*.85,low,z},{w*.85,low,z},{w,low+.10,z},
++                {w,high-.12,z},{w*.84,high,z},{-w*.84,high,z},
++                {-w,high-.12,z},{-w,low+.10,z}};
++            if(prev==null) face(material,ring);
++            else for(int i=0;i<8;i++) face(material,prev[i],prev[(i+1)%8],ring[(i+1)%8],ring[i]);
++            prev=ring;
++        }
++        face(material,prev);
++    }
++    private void wheel(double x,double y,double z) {
++        int n=16;
++        double outer=x+Math.signum(x)*.11, inner=x-Math.signum(x)*.11;
++        double[][] cap=new double[n][];
++        for(int i=0;i<n;i++) {
++            double t=i*2*Math.PI/n, u=(i+1)*2*Math.PI/n;
++            double[] a={outer,y+Math.sin(t)*.33,z+Math.cos(t)*.33};
++            double[] b={outer,y+Math.sin(u)*.33,z+Math.cos(u)*.33};
++            cap[i]=a;
++            face(WHEEL,a,b,new double[]{inner,b[1],b[2]},new double[]{inner,a[1],a[2]});
++        }
++        face(WHEEL,cap);
++        double[][] rim=new double[n][];
++        for(int i=0;i<n;i++) {
++            double t=i*2*Math.PI/n;
++            rim[i]=new double[]{outer+Math.signum(x)*.006,y+Math.sin(t)*.22,z+Math.cos(t)*.22};
++        }
++        face(ALLOY,rim);
++    }
++
++    /** Perspective projection with a fixed rear camera. One uniform scale preserves shape. */
++    public List<ProjectedFace> project(double yawDegrees) {
++        double yaw=Math.toRadians(Math.max(-12,Math.min(12,yawDegrees)));
++        double sy=Math.sin(yaw),cy=Math.cos(yaw), pitch=.42;
++        List<ProjectedFace> result=new ArrayList<>();
++        for(Face face:faces) {
++            int n=face.vertices.length;
++            double[] xs=new double[n],ys=new double[n];
++            double[][] rotated=new double[n][3];
++            double depth=0;
++            for(int i=0;i<n;i++) {
++                double[] v=face.vertices[i];
++                double x=v[0]*cy+v[2]*sy,z=-v[0]*sy+v[2]*cy,y=v[1]-.7;
++                rotated[i]=new double[]{x,y,z};
++                double cz=z*Math.cos(pitch)-y*Math.sin(pitch)+8;
++                xs[i]=x/cz; ys[i]=-(y*Math.cos(pitch)+z*Math.sin(pitch))/cz;
++                depth+=cz/n;
++            }
++            double[] a=rotated[0],b=rotated[1],c=rotated[2];
++            double ux=b[0]-a[0],uy=b[1]-a[1],uz=b[2]-a[2];
++            double vx=c[0]-a[0],vy=c[1]-a[1],vz=c[2]-a[2];
++            double nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
++            double norm=Math.sqrt(nx*nx+ny*ny+nz*nz);
++            double light=norm<1e-8?.8:.64+.36*Math.abs((nx*.3+ny*.8-nz*.5)/norm);
++            result.add(new ProjectedFace(xs,ys,depth,Math.min(1,light),face.material));
++        }
++        result.sort(Comparator.comparingDouble((ProjectedFace f)->f.depth).reversed());
++        return result;
++    }
++}
+diff --git a/app/src/main/java/com/example/carrothud/VehicleMeshRenderer.kt b/app/src/main/java/com/example/carrothud/VehicleMeshRenderer.kt
+new file mode 100644
+index 0000000..6e292c8
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/VehicleMeshRenderer.kt
+@@ -0,0 +1,62 @@
++package com.example.carrothud
++
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.Paint
++import android.graphics.Path
++import android.graphics.RectF
++import kotlin.math.min
++
++/** Software 3D rasterizer for the AA Canvas; no offscreen screenshots or sprites. */
++class VehicleMeshRenderer {
++    private val crossover = VehicleMesh(true)
++    private val sedan = VehicleMesh(false)
++    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val path = Path()
++    private var cachedYaw = Double.NaN
++    private var egoFaces = crossover.project(0.0)
++    private val leadFaces = sedan.project(0.0)
++
++    fun draw(canvas: Canvas, bounds: RectF, ego: Boolean, yaw: Float,
++             leftSignal: Boolean, rightSignal: Boolean) {
++        val angle = (yaw * 2).toInt() / 2.0
++        if (ego && angle != cachedYaw) {
++            egoFaces = crossover.project(angle)
++            cachedYaw = angle
++        }
++        val faces = if (ego) egoFaces else leadFaces
++        val minX = faces.minOf { it.x.minOrNull()!! }
++        val maxX = faces.maxOf { it.x.maxOrNull()!! }
++        val minY = faces.minOf { it.y.minOrNull()!! }
++        val maxY = faces.maxOf { it.y.maxOrNull()!! }
++        val scale = min(bounds.width() / (maxX-minX), bounds.height() / (maxY-minY))
++        val cx = (minX+maxX)/2
++        val cy = (minY+maxY)/2
++        paint.style = Paint.Style.FILL
++        for (face in faces) {
++            path.rewind()
++            for (i in face.x.indices) {
++                val x = (bounds.centerX()+(face.x[i]-cx)*scale).toFloat()
++                val y = (bounds.centerY()+(face.y[i]-cy)*scale).toFloat()
++                if (i == 0) path.moveTo(x,y) else path.lineTo(x,y)
++            }
++            path.close()
++            val base = when (face.material) {
++                VehicleMesh.BODY -> if (ego) Color.rgb(247,248,248) else Color.rgb(137,145,151)
++                VehicleMesh.GLASS -> Color.rgb(35,46,55)
++                VehicleMesh.TRIM -> Color.rgb(43,47,50)
++                VehicleMesh.WHEEL -> Color.rgb(23,25,27)
++                VehicleMesh.ALLOY -> Color.rgb(165,172,177)
++                VehicleMesh.TAIL -> Color.rgb(165,23,29)
++                VehicleMesh.LEFT_SIGNAL -> if (leftSignal) Color.rgb(255,171,14) else Color.rgb(88,53,25)
++                VehicleMesh.RIGHT_SIGNAL -> if (rightSignal) Color.rgb(255,171,14) else Color.rgb(88,53,25)
++                else -> Color.GRAY
++            }
++            val light = if ((face.material == VehicleMesh.LEFT_SIGNAL && leftSignal) ||
++                (face.material == VehicleMesh.RIGHT_SIGNAL && rightSignal)) 1.0 else face.light
++            paint.color = Color.rgb((Color.red(base)*light).toInt(),
++                (Color.green(base)*light).toInt(),(Color.blue(base)*light).toInt())
++            canvas.drawPath(path,paint)
++        }
++    }
++}
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index b793fa7..ef183fe 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -10,6 +10,8 @@ dependencyResolutionManagement {
+     repositories {
+         google()
+         mavenCentral()
++        maven { url = uri("https://devrepo.kakaomobility.com/repository/kakao-mobility-android-knsdk-public/") }
++        maven { url = uri("https://www.jitpack.io") }
+     }
+ }
+ 
+diff --git a/tests/RoadMotionCheck.java b/tests/RoadMotionCheck.java
+new file mode 100644
+index 0000000..f336816
+--- /dev/null
++++ b/tests/RoadMotionCheck.java
+@@ -0,0 +1,24 @@
++import com.example.carrothud.RoadMotion;
++
++public final class RoadMotionCheck {
++    private static void same(float actual, float expected) {
++        if (Math.abs(actual - expected) > 0.00001f) throw new AssertionError(actual + " != " + expected);
++    }
++    public static void main(String[] args) {
++        RoadMotion motion = new RoadMotion();
++        same(motion.advance(0, 0, true), 0);
++        same(motion.advance(100, 0, true), 0);
++        float moving = motion.advance(200, 36, true);
++        same(moving, 1f / 35f);
++        same(motion.advance(300, 0, true), moving);
++        same(motion.advance(400, 0.3f, true), moving);
++        same(motion.advance(500, 100, false), moving);
++        same(motion.advance(600, Float.NaN, true), moving);
++        same(motion.advance(700, Float.POSITIVE_INFINITY, true), moving);
++        same(motion.advance(800, -1, true), moving);
++        same(motion.advance(900, 72, true), moving + 2f / 35f);
++        motion.pause();
++        same(motion.advance(999999, 72, true), moving + 2f / 35f);
++        System.out.println("PASS: stop, movement, speed change, disconnect, noise, invalid speed, resume");
++    }
++}
+diff --git a/tests/VehicleMeshCheck.java b/tests/VehicleMeshCheck.java
+new file mode 100644
+index 0000000..aa5b58d
+--- /dev/null
++++ b/tests/VehicleMeshCheck.java
+@@ -0,0 +1,24 @@
++import com.example.carrothud.VehicleMesh;
++public class VehicleMeshCheck {
++    public static void main(String[] args) {
++        for (boolean ego : new boolean[]{true,false}) {
++            VehicleMesh mesh = new VehicleMesh(ego);
++            for (double yaw : new double[]{-12,0,12}) {
++                double previous=Double.POSITIVE_INFINITY;
++                int faces=0;
++                for(VehicleMesh.ProjectedFace f:mesh.project(yaw)) {
++                    if(f.depth>previous) throw new AssertionError("depth sorting");
++                    previous=f.depth;
++                    if(f.light<0 || f.light>1) throw new AssertionError("lighting");
++                    for(int i=0;i<f.x.length;i++) {
++                        if(!Double.isFinite(f.x[i]) || !Double.isFinite(f.y[i]))
++                            throw new AssertionError("invalid projection");
++                    }
++                    faces++;
++                }
++                if(faces<100) throw new AssertionError("missing mesh");
++            }
++        }
++        System.out.println("Vehicle mesh checks passed");
++    }
++}
+diff --git a/tests/verify_kakao_callbacks.py b/tests/verify_kakao_callbacks.py
+new file mode 100644
+index 0000000..db708bb
+--- /dev/null
++++ b/tests/verify_kakao_callbacks.py
+@@ -0,0 +1,74 @@
++"""Validate reflection bridge against the pinned SDK's public JVM method descriptors."""
++import io
++import struct
++import sys
++import zipfile
++
++
++def methods(data):
++    stream = io.BytesIO(data)
++    def read(n):
++        result = stream.read(n)
++        if len(result) != n:
++            raise ValueError("truncated class")
++        return result
++    def u1(): return read(1)[0]
++    def u2(): return struct.unpack(">H", read(2))[0]
++    def u4(): return struct.unpack(">I", read(4))[0]
++    assert u4() == 0xCAFEBABE
++    read(4)
++    pool = [None] * u2()
++    i = 1
++    while i < len(pool):
++        tag = u1()
++        if tag == 1:
++            pool[i] = read(u2()).decode("utf-8", errors="replace")
++        elif tag in (3, 4): read(4)
++        elif tag in (5, 6): read(8); i += 1
++        elif tag in (7, 8, 16, 19, 20): read(2)
++        elif tag in (9, 10, 11, 12, 17, 18): read(4)
++        elif tag == 15: read(3)
++        else: raise ValueError(f"unsupported constant {tag}")
++        i += 1
++    read(6)
++    read(2 * u2())
++    def attributes():
++        for _ in range(u2()):
++            read(2)
++            read(u4())
++    for _ in range(u2()):
++        read(6)
++        attributes()
++    result = []
++    for _ in range(u2()):
++        access, name, descriptor = u2(), u2(), u2()
++        result.append((access, pool[name], pool[descriptor]))
++        attributes()
++    return result
++
++
++with zipfile.ZipFile(sys.argv[1]) as archive:
++    def inspect(name): return methods(archive.read(name + ".class"))
++    guidance = inspect("com/kakaomobility/knsdk/guidance/knguidance/KNGuidance")
++    view = {(name, desc) for access, name, desc in inspect("com/kakaomobility/knsdk/ui/view/KNNaviView") if access & 1}
++    setters = ("setGuideStateDelegate", "setLocationGuideDelegate", "setRouteGuideDelegate",
++               "setSafetyGuideDelegate", "setVoiceGuideDelegate", "setCitsGuideDelegate")
++    checked = 0
++    missing = []
++    for setter in setters:
++        descriptor = next(desc for _, name, desc in guidance if name == setter)
++        interface = descriptor[2:descriptor.index(";")]
++        for access, name, desc in inspect(interface):
++            if not access & 1 or access & 8 or name.startswith("<"):
++                continue
++            matched = (name, desc) in view
++            if name == "guidanceGuideEnded":
++                matched |= (name, desc.replace(")", "Z)", 1)) in view
++            if name == "guidanceRouteChanged":
++                matched |= (name, "(" + desc[1:desc.index(";")+1] + ")V") in view
++            if not matched:
++                missing.append(f"{name}{desc}")
++            checked += 1
++    assert not missing, "Missing KNNaviView callbacks:\n" + "\n".join(missing)
++    assert checked >= 10, "incomplete callback inspection"
++    print(f"Kakao callback bridge verified: {checked} callbacks")

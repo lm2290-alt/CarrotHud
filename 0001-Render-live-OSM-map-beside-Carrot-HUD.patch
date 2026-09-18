@@ -1,14 +1,3 @@
-From 02f0ff2281b9eaf951e2b8a3f36e080f8654f078 Mon Sep 17 00:00:00 2001
-From: Codex <codex@openai.com>
-Date: Fri, 18 Sep 2026 12:23:11 +0900
-Subject: [PATCH] Render live OSM map beside Carrot HUD
-
----
- app/src/main/AndroidManifest.xml              |   2 +
- .../com/example/carrothud/CarrotMainScreen.kt | 160 +++++++++++++++---
- .../com/example/carrothud/MainActivity.kt     |  14 ++
- 3 files changed, 148 insertions(+), 28 deletions(-)
-
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
 index 80f6b61..e7f043a 100644
 --- a/app/src/main/AndroidManifest.xml
@@ -23,7 +12,7 @@ index 80f6b61..e7f043a 100644
      <!-- Android Auto Surface 렌더링 필수 -->
      <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
 diff --git a/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt b/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
-index 3b18577..a6fb140 100644
+index 3b18577..aacfb1f 100644
 --- a/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
 +++ b/app/src/main/java/com/example/carrothud/CarrotMainScreen.kt
 @@ -1,5 +1,9 @@
@@ -36,7 +25,7 @@ index 3b18577..a6fb140 100644
  import android.graphics.BitmapFactory
  import android.graphics.Canvas
  import android.graphics.Color
-@@ -9,8 +13,12 @@ import android.graphics.Path
+@@ -9,8 +13,13 @@ import android.graphics.Path
  import android.graphics.PointF
  import android.graphics.RectF
  import android.graphics.Shader
@@ -44,12 +33,13 @@ index 3b18577..a6fb140 100644
 +import android.location.LocationListener
 +import android.location.LocationManager
  import android.os.SystemClock
++import android.os.Looper
  import android.util.Log
 +import android.util.LruCache
  import androidx.car.app.AppManager
  import androidx.car.app.CarContext
  import androidx.car.app.Screen
-@@ -30,10 +38,16 @@ import java.net.Socket
+@@ -30,10 +39,15 @@ import java.net.Socket
  import java.nio.ByteBuffer
  import java.nio.ByteOrder
  import java.util.Collections
@@ -60,16 +50,17 @@ index 3b18577..a6fb140 100644
 +import kotlin.math.ln
  import kotlin.math.max
  import kotlin.math.min
+-import kotlin.math.sin
 +import kotlin.math.pow
- import kotlin.math.sin
 +import kotlin.math.tan
  
  class CarrotMainScreen(
      carContext: CarContext
-@@ -84,6 +98,16 @@ class CarrotMainScreen(
+@@ -84,6 +98,17 @@ class CarrotMainScreen(
          .build()
  
      private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val roadMotion = RoadMotion()
 +    private val mapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 +    private val tileCache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
 +        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
@@ -83,7 +74,7 @@ index 3b18577..a6fb140 100644
      private val egoVehicleBitmap =
          BitmapFactory.decodeResource(carContext.resources, R.drawable.ego_niro_de_3d)
      private val leadVehicleBitmap =
-@@ -101,6 +125,26 @@ class CarrotMainScreen(
+@@ -101,12 +126,34 @@ class CarrotMainScreen(
                  e
              )
          }
@@ -104,13 +95,21 @@ index 3b18577..a6fb140 100644
 +                LocationManager.GPS_PROVIDER,
 +                500L,
 +                1f,
-+                locationListener
++                locationListener,
++                Looper.getMainLooper()
 +            )
 +        }.onFailure { Log.w(TAG, "Location updates unavailable", it) }
      }
  
      override fun onSurfaceAvailable(
-@@ -488,10 +532,8 @@ class CarrotMainScreen(
+         surfaceContainer: SurfaceContainer
+     ) {
+         this.surfaceContainer = surfaceContainer
++        roadMotion.pause()
+         rendering = true
+ 
+         startRenderer()
+@@ -488,10 +535,8 @@ class CarrotMainScreen(
  
              val s = state
  
@@ -122,7 +121,16 @@ index 3b18577..a6fb140 100644
  
              canvas.save()
              canvas.clipRect(splitX, 0f, width, height)
-@@ -543,43 +585,105 @@ class CarrotMainScreen(
+@@ -500,7 +545,7 @@ class CarrotMainScreen(
+ 
+             drawRoadBackground(canvas, hudWidth, height)
+ 
+-            drawRoadMotion(canvas, hudWidth, height, s.speedKph)
++            drawRoadMotion(canvas, hudWidth, height, if (s.connected) s.speedKph else 0f)
+ 
+             drawRoad(
+                 canvas,
+@@ -543,43 +588,105 @@ class CarrotMainScreen(
          }
      }
  
@@ -253,6 +261,100 @@ index 3b18577..a6fb140 100644
      }
  
      /** All geometry uses normalized screen coordinates, so wide OEM surfaces never stretch a bitmap. */
+@@ -587,30 +694,16 @@ class CarrotMainScreen(
+         paint.style = Paint.Style.FILL
+         paint.shader = LinearGradient(
+             0f, 0f, 0f, height,
+-            Color.rgb(244, 245, 243), Color.rgb(205, 207, 203),
++            Color.rgb(250, 250, 250), Color.rgb(236, 238, 240),
+             Shader.TileMode.CLAMP
+         )
+         canvas.drawRect(0f, 0f, width, height, paint)
+         paint.shader = null
+ 
+-        // Soft distant landscape, drawn in screen-relative coordinates.
+-        paint.color = Color.rgb(218, 221, 216)
+-        canvas.drawPath(Path().apply {
+-            moveTo(0f, height * 0.33f)
+-            lineTo(width * 0.18f, height * 0.20f)
+-            lineTo(width * 0.34f, height * 0.31f)
+-            lineTo(width * 0.51f, height * 0.17f)
+-            lineTo(width * 0.72f, height * 0.32f)
+-            lineTo(width, height * 0.22f)
+-            lineTo(width, height * 0.43f)
+-            lineTo(0f, height * 0.43f)
+-            close()
+-        }, paint)
+-
+         // Tesla-like matte road plane. No bitmap scaling means no horizontal distortion.
+         paint.shader = LinearGradient(
+             0f, height * 0.25f, 0f, height,
+-            Color.rgb(226, 227, 224), Color.rgb(183, 187, 185),
++            Color.rgb(245, 246, 247), Color.rgb(224, 227, 230),
+             Shader.TileMode.CLAMP
+         )
+         canvas.drawPath(Path().apply {
+@@ -675,9 +768,7 @@ class CarrotMainScreen(
+ 
+     /** Moving perspective markers provide continuous forward-motion depth at the live vehicle speed. */
+     private fun drawRoadMotion(canvas: Canvas, width: Float, height: Float, speedKph: Float) {
+-        val now = SystemClock.uptimeMillis() / 1000f
+-        val speedFactor = (speedKph / 90f).coerceIn(0.08f, 1.8f)
+-        val phase = (now * speedFactor * 0.72f) % 1f
++        val phase = roadMotion.advance(SystemClock.uptimeMillis(), speedKph, true)
+ 
+         paint.style = Paint.Style.STROKE
+         paint.strokeCap = Paint.Cap.ROUND
+@@ -830,19 +921,14 @@ class CarrotMainScreen(
+         s: HudState
+     ) {
+         val cx = width * 0.5f
+-        val now = SystemClock.uptimeMillis()
+-        val roadPulse = (s.speedKph / 100f).coerceIn(0f, 1.2f)
+-        val bob = sin(now / 150.0).toFloat() * height * 0.0025f * roadPulse
+-        val sway = sin(now / 620.0).toFloat() * 0.65f * roadPulse
+-        val cy = height * 0.75f + bob
++        val cy = height * 0.75f
+         val blinkOn = (SystemClock.uptimeMillis() / 450L) % 2L == 0L
+         canvas.save()
+-        canvas.rotate(sway, cx, cy)
+         drawTopDownCar(
+             canvas,
+             cx,
+             cy,
+-            width * 0.115f,
++            width * 0.25f,
+             height * 0.31f,
+             true,
+             s.enabled,
+@@ -962,13 +1048,12 @@ class CarrotMainScreen(
+         val leadAspect = leadVehicleBitmap.width.toFloat() / leadVehicleBitmap.height.toFloat()
+         val leadDrawnW = min(carW, carH * leadAspect)
+         val leadDrawnH = leadDrawnW / leadAspect
+-        val leadBob = sin(SystemClock.uptimeMillis() / 210.0).toFloat() * height * 0.0014f
+         val egoAspect = egoVehicleBitmap.width.toFloat() / egoVehicleBitmap.height.toFloat()
+-        val egoDrawnW = min(width * 0.115f, height * 0.31f * egoAspect)
++        val egoDrawnW = min(width * 0.25f, height * 0.31f * egoAspect)
+         val egoDrawnH = egoDrawnW / egoAspect
+         val egoTop = height * 0.75f - egoDrawnH / 2f
+         val maximumLeadCenterY = egoTop - height * 0.025f - leadDrawnH / 2f
+-        val leadCenterY = min(point.y + leadBob, maximumLeadCenterY)
++        val leadCenterY = min(point.y, maximumLeadCenterY)
+         drawTopDownCar(canvas, point.x, leadCenterY, carW, carH, false)
+     }
+ 
+@@ -1057,9 +1142,9 @@ class CarrotMainScreen(
+ 
+         canvas.drawText(
+             if (s.connected)
+-                "GPS  ·  ONLINE"
++                "차량 연결됨"
+             else
+-                "SEARCHING COMMA 4",
++                "차량 연결 대기",
+             width * 0.5f,
+             height * 0.955f,
+             paint
 diff --git a/app/src/main/java/com/example/carrothud/MainActivity.kt b/app/src/main/java/com/example/carrothud/MainActivity.kt
 index 80c386b..4f4634b 100644
 --- a/app/src/main/java/com/example/carrothud/MainActivity.kt
@@ -285,6 +387,60 @@ index 80c386b..4f4634b 100644
          webView = WebView(this)
          setContentView(webView)
  
--- 
-2.51.1
-
+diff --git a/app/src/main/java/com/example/carrothud/RoadMotion.java b/app/src/main/java/com/example/carrothud/RoadMotion.java
+new file mode 100644
+index 0000000..b521cc4
+--- /dev/null
++++ b/app/src/main/java/com/example/carrothud/RoadMotion.java
+@@ -0,0 +1,21 @@
++package com.example.carrothud;
++
++/** Distance-driven road markings, independent of the Android frame scheduler. */
++public final class RoadMotion {
++    private long previousMillis = -1;
++    private float phase = 0f;
++
++    public float advance(long nowMillis, float speedKph, boolean connected) {
++        float seconds = previousMillis < 0 ? 0f
++                : Math.max(0f, Math.min(0.1f, (nowMillis - previousMillis) / 1000f));
++        previousMillis = nowMillis;
++        float speed = connected && Float.isFinite(speedKph) && speedKph >= 0.5f
++                ? speedKph : 0f;
++        phase = (phase + seconds * speed / 3.6f / 35f) % 1f;
++        return phase;
++    }
++
++    public void pause() {
++        previousMillis = -1;
++    }
++}
+diff --git a/tests/RoadMotionCheck.java b/tests/RoadMotionCheck.java
+new file mode 100644
+index 0000000..f336816
+--- /dev/null
++++ b/tests/RoadMotionCheck.java
+@@ -0,0 +1,24 @@
++import com.example.carrothud.RoadMotion;
++
++public final class RoadMotionCheck {
++    private static void same(float actual, float expected) {
++        if (Math.abs(actual - expected) > 0.00001f) throw new AssertionError(actual + " != " + expected);
++    }
++    public static void main(String[] args) {
++        RoadMotion motion = new RoadMotion();
++        same(motion.advance(0, 0, true), 0);
++        same(motion.advance(100, 0, true), 0);
++        float moving = motion.advance(200, 36, true);
++        same(moving, 1f / 35f);
++        same(motion.advance(300, 0, true), moving);
++        same(motion.advance(400, 0.3f, true), moving);
++        same(motion.advance(500, 100, false), moving);
++        same(motion.advance(600, Float.NaN, true), moving);
++        same(motion.advance(700, Float.POSITIVE_INFINITY, true), moving);
++        same(motion.advance(800, -1, true), moving);
++        same(motion.advance(900, 72, true), moving + 2f / 35f);
++        motion.pause();
++        same(motion.advance(999999, 72, true), moving + 2f / 35f);
++        System.out.println("PASS: stop, movement, speed change, disconnect, noise, invalid speed, resume");
++    }
++}
